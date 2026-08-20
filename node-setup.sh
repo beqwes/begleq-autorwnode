@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="2.2"
+VERSION="2.3"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -479,13 +479,24 @@ done
 OLD_IMAGE=""
 [ -f "$INSTALL_DIR/docker-compose.yml" ] && OLD_IMAGE="$(grep -oE 'image:[[:space:]]*[^[:space:]]+' "$INSTALL_DIR/docker-compose.yml" | grep -i 'remnawave/node' | head -1 | sed -E 's/image:[[:space:]]*//')"
 [ -n "$OLD_IMAGE" ] && ok "сейчас стоит образ $OLD_IMAGE"
+# в дефолт подставляем текущий образ ноды, но latest не предлагаем:
+# именно с него и прилетает alert 40, а сюда обычно приходят чинить его
+DEF_IMAGE="$NODE_IMAGE_DEFAULT"
+case "$OLD_IMAGE" in
+  ""|*:latest) : ;;
+  *) DEF_IMAGE="$OLD_IMAGE" ;;
+esac
 if [ -z "$NODE_IMAGE" ]; then
   say ""
   say "  Версия ноды должна совпадать с версией панели, иначе mTLS не сойдётся"
   say "  и в логах будет «tls alert handshake failure ... alert number 40»."
-  say "  latest сейчас 3.3.x; с панелями 2.8.x рабочая связка — 3.2.2."
+  say "  Достаточно вписать номер версии, например 3.2.2 — имя образа подставится само."
+  say "  latest сейчас 3.3.x и подходит только к панелям 3.3.x; с панелями 2.8.x берут 3.2.2."
+  case "$OLD_IMAGE" in
+    *:latest) warn "сейчас на ноде $OLD_IMAGE — если ловишь alert 40, впиши конкретную версию" ;;
+  esac
 fi
-ask NODE_IMAGE "Образ ноды" "${OLD_IMAGE:-$NODE_IMAGE_DEFAULT}"
+ask NODE_IMAGE "Образ ноды (можно просто номер версии)" "$DEF_IMAGE"
 case "$NODE_IMAGE" in
   *:*) : ;;                                   # уже с тегом
   */*) NODE_IMAGE="$NODE_IMAGE:latest" ;;     # репозиторий без тега
