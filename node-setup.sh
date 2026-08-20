@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="2.1"
+VERSION="2.2"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -36,8 +36,15 @@ LAST_COUNT="${LAST_COUNT:-10}"
 # не сходится по mTLS и валится с «tls alert handshake failure ... alert number 40»
 NODE_IMAGE="${NODE_IMAGE:-}"
 NODE_IMAGE_DEFAULT="remnawave/node:3.2.2"
-DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1
-FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0
+NGINX_IMAGE="${NGINX_IMAGE:-nginx:1.28}"
+# self-steal домен: под него выпускается сертификат и ставится сайт-заглушка
+DOMAIN="${DOMAIN:-}"
+EMAIL="${EMAIL:-}"
+SITE_THEME="${SITE_THEME:-}"
+XHTTP_PATH="${XHTTP_PATH:-/api/v3/media}"
+WEBROOT="${WEBROOT:-/var/www/html}"
+DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1
+FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0
 
 # ---------- вывод ----------
 if [ -t 1 ]; then C0=$'\e[0m'; CB=$'\e[1m'; CG=$'\e[32m'; CY=$'\e[33m'; CR=$'\e[31m'; CC=$'\e[36m'; CM=$'\e[35m'
@@ -61,6 +68,13 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --node-port <port>   порт связи с панелью (по умолчанию 2222, спросит при запуске)
   --node-version <tag> версия образа ноды, например 3.2.2 или latest
   --node-image <ref>   образ целиком, если нужен свой реестр
+  --domain <host>      self-steal домен ноды: сертификат, nginx и сайт-заглушка
+  --email <mail>       почта для Let's Encrypt (по умолчанию admin@домен)
+  --xhttp-path <path>  путь, который nginx отдаёт Xray (по умолчанию /api/v3/media)
+  --site-theme <t>     тема заглушки: media, files, studio, shop (по умолчанию случайная)
+  --force-site         перезаписать уже существующий сайт в /var/www/html
+  --no-nginx           не ставить nginx и не выпускать сертификат
+  --no-site            не трогать сайт-заглушку
   --hostname <name>    переименовать сервер
   --timezone <tz>      часовой пояс (по умолчанию Europe/Moscow)
   --dir <path>         каталог ноды (по умолчанию /opt/remnanode)
@@ -84,6 +98,13 @@ while [ $# -gt 0 ]; do
     --node-port)   NODE_PORT="${2:-}"; shift 2;;
     --node-version) NODE_IMAGE="remnawave/node:${2:-}"; shift 2;;
     --node-image)  NODE_IMAGE="${2:-}"; shift 2;;
+    --domain)      DOMAIN="${2:-}"; shift 2;;
+    --email)       EMAIL="${2:-}"; shift 2;;
+    --xhttp-path)  XHTTP_PATH="${2:-}"; shift 2;;
+    --site-theme)  SITE_THEME="${2:-}"; shift 2;;
+    --force-site)  FORCE_SITE=1; shift;;
+    --no-nginx)    DO_NGINX=0; shift;;
+    --no-site)     DO_SITE=0; shift;;
     --hostname)    NEW_HOSTNAME="${2:-}"; shift 2;;
     --timezone)    TIMEZONE="${2:-}"; shift 2;;
     --dir)         INSTALL_DIR="${2:-}"; shift 2;;
@@ -475,6 +496,41 @@ case "$NODE_IMAGE" in
 esac
 [ -n "$OLD_IMAGE" ] && [ "$OLD_IMAGE" != "$NODE_IMAGE" ] && warn "образ меняется: $OLD_IMAGE → $NODE_IMAGE"
 
+# --- домен self-steal: он же для сертификата и сайта-заглушки ---
+if [ "$DO_NGINX" = "1" ]; then
+  if [ -z "$DOMAIN" ]; then
+    say ""
+    say "  Домен ноды нужен для сертификата, nginx и сайта-заглушки."
+    say "  A-запись должна уже указывать на этот сервер. Enter — пропустить,"
+    say "  тогда поднимется только нода без nginx и заглушки."
+  fi
+  ask DOMAIN "Домен ноды (self-steal)" ""
+  if [ -z "$DOMAIN" ]; then
+    DO_NGINX=0
+    warn "домен не задан — nginx, сертификат и сайт пропускаются"
+  else
+    ask EMAIL "Почта для Let's Encrypt" "admin@$DOMAIN"
+    RESOLVED="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')"
+    MY_IP="$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null)"
+    if [ -z "$RESOLVED" ]; then
+      warn "$DOMAIN не резолвится — сертификат не выпустится, пока не появится A-запись"
+    elif [ -n "$MY_IP" ] && [ "$RESOLVED" != "$MY_IP" ]; then
+      warn "$DOMAIN указывает на $RESOLVED, а сервер $MY_IP — сертификат не выпустится"
+    else
+      ok "DNS: $DOMAIN → $RESOLVED"
+    fi
+    # тема заглушки: если не задана — берём случайную
+    if [ -z "$SITE_THEME" ]; then
+      SITE_THEME="$(shuf -e media files studio shop -n 1 2>/dev/null || echo media)"
+      ok "тема сайта-заглушки выбрана случайно: $SITE_THEME"
+    fi
+    case "$SITE_THEME" in
+      media|files|studio|shop) : ;;
+      *) die "неизвестная тема сайта: $SITE_THEME (media|files|studio|shop)";;
+    esac
+  fi
+fi
+
 ask PANEL_IP     "IP панели Remnawave (Enter — порт откроется всем)" ""
 ask NEW_HOSTNAME "Новое имя сервера (Enter — оставить $(hostname))" ""
 ask TIMEZONE     "Часовой пояс" "Europe/Moscow"
@@ -498,7 +554,7 @@ part "ЧАСТЬ 3: настройка"
 # #############################################################################
 
 # =============================================================================
-step "1/8  Имя, часовой пояс, время"
+step "1/11  Имя, часовой пояс, время"
 # =============================================================================
 if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$(hostname)" ]; then
   if hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null; then
@@ -514,7 +570,7 @@ fi
 timedatectl set-ntp true >/dev/null 2>&1
 
 # =============================================================================
-step "2/8  Пакеты"
+step "2/11  Пакеты"
 # =============================================================================
 apt-get update -qq 2>/dev/null && ok "apt update" || err "apt update не прошёл"
 if [ "$DO_UPGRADE" = "1" ]; then
@@ -526,7 +582,7 @@ PKGS="curl ca-certificates gnupg jq unzip tar htop ufw chrony net-tools dnsutils
 apt-get install -y -qq $PKGS >/dev/null 2>&1 && ok "базовые пакеты на месте" || warn "часть пакетов не поставилась"
 
 # =============================================================================
-step "3/8  Swap"
+step "3/11  Swap"
 # =============================================================================
 RAM_MB="$(free -m | awk '/^Mem:/{print $2}')"
 SWAP_MB="$(free -m | awk '/^Swap:/{print $2}')"
@@ -542,7 +598,7 @@ else
 fi
 
 # =============================================================================
-step "4/8  Сетевые лимиты и BBR"
+step "4/11  Сетевые лимиты и BBR"
 # =============================================================================
 cat > /etc/sysctl.d/99-remnanode.conf <<'SYSCTL'
 # сеть под VPN-нагрузку
@@ -572,7 +628,7 @@ LIM
 ok "лимиты открытых файлов подняты"
 
 # =============================================================================
-step "5/8  Docker"
+step "5/11  Docker"
 # =============================================================================
 if command -v docker >/dev/null 2>&1; then
   ok "docker уже стоит: $(docker --version | awk '{print $3}' | tr -d ,)"
@@ -602,7 +658,7 @@ else
 fi
 
 # =============================================================================
-step "6/8  Фаервол и fail2ban"
+step "6/11  Фаервол и fail2ban"
 # =============================================================================
 if [ "$DO_UFW" != "1" ]; then
   warn "ufw пропущен по флагу"
@@ -650,16 +706,319 @@ F2B
 fi
 
 # =============================================================================
-step "7/8  Нода Remnawave"
+step "7/11  Сертификат Let's Encrypt"
+# =============================================================================
+CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+if [ "$DO_NGINX" != "1" ]; then
+  warn "пропущено: домен не задан"
+elif [ -f "$CERT_DIR/fullchain.pem" ]; then
+  ok "сертификат уже есть, годен до $(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+else
+  command -v certbot >/dev/null 2>&1 || apt-get install -y -qq certbot >/dev/null 2>&1
+  # :80 в этой схеме свободен — Xray держит только :443, nginx сидит на сокете
+  BUSY80="$(ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -x 80 | head -1)"
+  [ -n "$BUSY80" ] && warn "порт 80 кем-то занят — certbot может не пройти"
+  if certbot certonly --standalone -n --agree-tos -m "$EMAIL" -d "$DOMAIN" >/dev/null 2>&1; then
+    ok "сертификат выпущен для $DOMAIN"
+  else
+    err "certbot не выпустил сертификат для $DOMAIN (проверь A-запись и что :80 доступен снаружи)"
+  fi
+fi
+# после продления nginx надо перечитать сертификат
+if [ "$DO_NGINX" = "1" ]; then
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-remnawave-nginx.sh <<'HOOK'
+#!/bin/sh
+docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1 || true
+HOOK
+  chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-remnawave-nginx.sh
+fi
+
+# =============================================================================
+step "8/11  Сайт-заглушка"
+# =============================================================================
+if [ "$DO_NGINX" != "1" ] || [ "$DO_SITE" != "1" ]; then
+  warn "пропущено"
+elif [ -f "$WEBROOT/index.html" ] && [ "$FORCE_SITE" != "1" ]; then
+  ok "сайт в $WEBROOT уже есть — не трогаю (--force-site чтобы перезаписать)"
+else
+  [ -d "$WEBROOT" ] && [ -n "$(ls -A "$WEBROOT" 2>/dev/null)" ] && {
+    cp -a "$WEBROOT" "${WEBROOT}.bak.$STAMP"; ok "старый сайт → ${WEBROOT}.bak.$STAMP"; }
+
+  # содержимое подбирается под тему, названия и цифры разные при каждом запуске
+  RND_A="$(shuf -i 1000-9999 -n 1 2>/dev/null || echo 4242)"
+  case "$SITE_THEME" in
+    media)
+      SITE_NAME="$(shuf -e Lumen Vireo Aster Nimbus Kestrel -n 1 2>/dev/null || echo Lumen) Stream"
+      TAGLINE="Потоковое видео и трансляции"; NAV2="Библиотека"; NAV2_SLUG="library"
+      F1="Прямые эфиры|Мультибитрейтный HLS, адаптивное качество, задержка до 4 секунд."
+      F2="Библиотека|Более 12 000 часов записей с автоматической расстановкой глав."
+      F3="Аналитика|Онлайн-статистика по зрителям, буферизации и качеству сегментов." ;;
+    files)
+      SITE_NAME="$(shuf -e Dropstone Cratebox Vaultly Parcело Filoak -n 1 2>/dev/null || echo Dropstone)"
+      TAGLINE="Файловое хранилище и обмен"; NAV2="Тарифы"; NAV2_SLUG="pricing"
+      F1="Быстрая отдача|Раздача по 10 Гбит/с, докачка, прямые ссылки без ожидания."
+      F2="Шифрование|AES-256 на стороне хранилища, ссылки с ограниченным сроком жизни."
+      F3="API|Загрузка чанками, вебхуки на завершение, S3-совместимость." ;;
+    studio)
+      SITE_NAME="$(shuf -e Northline Meridian Karbon Oakform Pilotworks -n 1 2>/dev/null || echo Northline) Studio"
+      TAGLINE="Веб-разработка и цифровые продукты"; NAV2="Работы"; NAV2_SLUG="work"
+      F1="Продукты|Проектирование, дизайн-система, фронтенд и бэкенд одной командой."
+      F2="Поддержка|Дежурная смена, мониторинг, восстановление до 30 минут."
+      F3="Интеграции|Платежи, CRM, складской учёт и телеметрия в одном контуре." ;;
+    shop)
+      SITE_NAME="$(shuf -e Vellum Ferra Lintwood Bruna Sadovaya -n 1 2>/dev/null || echo Vellum) Store"
+      TAGLINE="Товары для дома и интерьера"; NAV2="Каталог"; NAV2_SLUG="catalog"
+      F1="Доставка|По городу за день, по стране от двух дней, самовывоз из 14 точек."
+      F2="Возврат|30 дней на возврат без объяснения причин, обмен по размеру бесплатно."
+      F3="Гарантия|Официальная гарантия производителя, сервис в каждом регионе." ;;
+  esac
+  ACCENT="$(shuf -e '#2f6df6' '#0f9d76' '#c2410c' '#7c3aed' '#0891b2' -n 1 2>/dev/null || echo '#2f6df6')"
+
+  mkdir -p "$WEBROOT/assets/js" "$WEBROOT/$NAV2_SLUG" "$WEBROOT/about"
+
+  cat > "$WEBROOT/assets/style.css" <<CSS
+:root{--bg:#fff;--fg:#14171c;--muted:#5d6673;--line:#e6e9ee;--acc:$ACCENT;--card:#fafbfd}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e8ecf2;--muted:#98a2b3;--line:#232833;--card:#151922}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1060px;margin:0 auto;padding:0 20px}
+header{border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+header .wrap{display:flex;align-items:center;gap:24px;height:62px}
+.logo{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:-.02em}
+.logo i{width:22px;height:22px;border-radius:6px;background:var(--acc);display:block}
+nav{margin-left:auto;display:flex;gap:20px}nav a{color:var(--muted);font-size:14px}
+.hero{padding:70px 0 40px}.hero h1{font-size:40px;line-height:1.15;margin:0 0 14px;letter-spacing:-.03em}
+.hero p{color:var(--muted);font-size:18px;max-width:620px;margin:0 0 26px}
+.btn{display:inline-block;padding:11px 20px;border-radius:9px;background:var(--acc);color:#fff;font-weight:600;font-size:15px}
+.btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;padding:26px 0 60px}
+.card{border:1px solid var(--line);border-radius:14px;padding:20px;background:var(--card)}
+.card h3{margin:0 0 8px;font-size:17px}.card p{margin:0;color:var(--muted);font-size:14px}
+.stats{display:flex;gap:34px;flex-wrap:wrap;padding:26px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stats div b{display:block;font-size:26px;letter-spacing:-.02em}.stats div span{color:var(--muted);font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0 40px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600}
+footer{border-top:1px solid var(--line);padding:26px 0;color:var(--muted);font-size:13px}
+footer .wrap{display:flex;gap:18px;flex-wrap:wrap}
+h2{font-size:24px;letter-spacing:-.02em;margin:38px 0 10px}
+p.lead{color:var(--muted)}
+@media(max-width:640px){.hero h1{font-size:30px}nav{display:none}}
+CSS
+
+  cat > "$WEBROOT/assets/js/app.js" <<'JS'
+(function () {
+  var started = Date.now();
+  function tick() {
+    var el = document.querySelector('[data-uptime]');
+    if (el) {
+      var s = Math.floor((Date.now() - started) / 1000);
+      el.textContent = Math.floor(s / 60) + 'м ' + (s % 60) + 'с';
+    }
+  }
+  setInterval(tick, 1000); tick();
+  document.querySelectorAll('[data-toggle]').forEach(function (b) {
+    b.addEventListener('click', function (e) {
+      e.preventDefault();
+      var box = document.querySelector(b.getAttribute('data-toggle'));
+      if (box) box.hidden = !box.hidden;
+    });
+  });
+  try {
+    var k = 'v_' + new Date().toISOString().slice(0, 10);
+    var n = parseInt(localStorage.getItem(k) || '0', 10) + 1;
+    localStorage.setItem(k, String(n));
+    var c = document.querySelector('[data-visits]');
+    if (c) c.textContent = String(n);
+  } catch (e) {}
+})();
+JS
+
+  cat > "$WEBROOT/favicon.svg" <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="$ACCENT"/><path d="M20 20h24v8H20zm0 16h24v8H20z" fill="#fff"/></svg>
+SVG
+
+  page_head() {
+    printf '%s\n' "<!doctype html>" "<html lang=\"ru\"><head>" \
+      "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" \
+      "<title>$1 — $SITE_NAME</title>" \
+      "<meta name=\"description\" content=\"$TAGLINE\">" \
+      "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">" \
+      "<link rel=\"stylesheet\" href=\"/assets/style.css\">" \
+      "</head><body>" \
+      "<header><div class=\"wrap\">" \
+      "  <a class=\"logo\" href=\"/\"><i></i>$SITE_NAME</a>" \
+      "  <nav><a href=\"/\">Главная</a><a href=\"/$NAV2_SLUG/\">$NAV2</a><a href=\"/about/\">О нас</a></nav>" \
+      "</div></header>"
+  }
+  page_foot() {
+    printf '%s\n' "<footer><div class=\"wrap\">" \
+      "  <span>© $(date +%Y) $SITE_NAME</span>" \
+      "  <span>Сессия: <b data-uptime>0м 0с</b></span>" \
+      "  <span>Визитов: <b data-visits>1</b></span>" \
+      "</div></footer>" \
+      "<script src=\"/assets/js/app.js\"></script>" \
+      "</body></html>"
+  }
+  card() { printf '    <div class="card"><h3>%s</h3><p>%s</p></div>\n' "${1%%|*}" "${1#*|}"; }
+
+  {
+    page_head "$TAGLINE"
+    printf '%s\n' "<section class=\"hero\"><div class=\"wrap\">" \
+      "  <h1>$SITE_NAME</h1>" \
+      "  <p>$TAGLINE. Инфраструктура в двух дата-центрах, отдача через распределённую сеть кэширования.</p>" \
+      "  <a class=\"btn\" href=\"/$NAV2_SLUG/\">Раздел «$NAV2»</a>" \
+      "  <a class=\"btn ghost\" href=\"/about/\">Подробнее</a>" \
+      "</div></section>" \
+      "<div class=\"wrap\">" \
+      "  <div class=\"stats\">" \
+      "    <div><b>99.9%</b><span>доступность за 90 дней</span></div>" \
+      "    <div><b>$((RND_A % 40 + 12)) мс</b><span>медианный отклик</span></div>" \
+      "    <div><b>$((RND_A % 9 + 6))</b><span>точек присутствия</span></div>" \
+      "    <div><b>10 Гбит/с</b><span>полоса на узел</span></div>" \
+      "  </div>" \
+      "  <div class=\"grid\">"
+    card "$F1"; card "$F2"; card "$F3"
+    printf '%s\n' "  </div>" "</div>"
+    page_foot
+  } > "$WEBROOT/index.html"
+
+  {
+    page_head "$NAV2"
+    printf '%s\n' "<div class=\"wrap\">" \
+      "  <h2>$NAV2</h2>" \
+      "  <p class=\"lead\">Раздел обновляется автоматически. Ниже последние записи.</p>" \
+      "  <table>" \
+      "    <tr><th>Название</th><th>Обновлено</th><th>Размер</th><th>Статус</th></tr>" \
+      "    <tr><td>Выпуск $(date +%Y)-$(date +%m)</td><td>$(date +%d.%m.%Y)</td><td>1.2 ГБ</td><td>Готово</td></tr>" \
+      "    <tr><td>Выпуск $(date -d '-1 month' +%Y-%m 2>/dev/null || date +%Y-%m)</td><td>$(date -d '-31 days' +%d.%m.%Y 2>/dev/null || date +%d.%m.%Y)</td><td>940 МБ</td><td>Готово</td></tr>" \
+      "    <tr><td>Архив $(($(date +%Y)-1))</td><td>$(($(date +%Y)-1))</td><td>18 ГБ</td><td>В архиве</td></tr>" \
+      "  </table>" \
+      "  <p><a href=\"#\" data-toggle=\"#more\">Показать технические детали</a></p>" \
+      "  <div id=\"more\" hidden class=\"card\"><p>Объекты раздаются через кэширующий слой, ключи инвалидации живут 3600 секунд.</p></div>" \
+      "</div>"
+    page_foot
+  } > "$WEBROOT/$NAV2_SLUG/index.html"
+
+  {
+    page_head "О нас"
+    printf '%s\n' "<div class=\"wrap\">" \
+      "  <h2>О компании</h2>" \
+      "  <p class=\"lead\">$SITE_NAME работает с $(($(date +%Y)-6)) года. $TAGLINE — основное направление.</p>" \
+      "  <div class=\"grid\">" \
+      "    <div class=\"card\"><h3>Инфраструктура</h3><p>Стойки в двух ЦОД, резервирование питания и каналов, ежедневные снапшоты.</p></div>" \
+      "    <div class=\"card\"><h3>Поддержка</h3><p>Обращения принимаются круглосуточно, первая реакция в течение 15 минут.</p></div>" \
+      "    <div class=\"card\"><h3>Документы</h3><p>Оферта и политика обработки данных доступны по запросу.</p></div>" \
+      "  </div>" \
+      "  <h2>Контакты</h2>" \
+      "  <table><tr><th>Почта</th><td>info@$DOMAIN</td></tr><tr><th>Поддержка</th><td>help@$DOMAIN</td></tr></table>" \
+      "</div>"
+    page_foot
+  } > "$WEBROOT/about/index.html"
+
+  # путь Xray в robots.txt намеренно не упоминается
+  printf 'User-agent: *\nAllow: /\nDisallow: /admin/\nSitemap: https://%s/sitemap.xml\n' "$DOMAIN" > "$WEBROOT/robots.txt"
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    printf '  <url><loc>https://%s/</loc><priority>1.0</priority></url>\n' "$DOMAIN"
+    printf '  <url><loc>https://%s/%s/</loc><priority>0.8</priority></url>\n' "$DOMAIN" "$NAV2_SLUG"
+    printf '  <url><loc>https://%s/about/</loc><priority>0.5</priority></url>\n' "$DOMAIN"
+    printf '%s\n' '</urlset>'
+  } > "$WEBROOT/sitemap.xml"
+
+  chown -R root:root "$WEBROOT" 2>/dev/null; chmod -R a+rX "$WEBROOT" 2>/dev/null
+  ok "сайт «$SITE_NAME» ($SITE_THEME) собран: главная, /$NAV2_SLUG/, /about/, robots, sitemap"
+fi
+
+# =============================================================================
+step "9/11  nginx"
+# =============================================================================
+if [ "$DO_NGINX" != "1" ]; then
+  warn "пропущено: домен не задан"
+else
+  [ -f "$INSTALL_DIR/nginx.conf" ] && { cp -a "$INSTALL_DIR/nginx.conf" "$INSTALL_DIR/nginx.conf.bak.$STAMP"; ok "бэкап nginx.conf"; }
+  # фрагмент для conf.d: nginx слушает не :443, а unix-сокет с proxy_protocol —
+  # :443 держит сам Xray и отдаёт сюда всё, что не его трафик (self-steal)
+  cat > "$INSTALL_DIR/nginx.conf" <<NGINX
+server_names_hash_bucket_size 64;
+
+access_log off;
+server_tokens off;
+
+real_ip_header proxy_protocol;
+set_real_ip_from unix:;
+
+map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    ""      close;
+}
+
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_ecdh_curve X25519:prime256v1:secp384r1;
+ssl_prefer_server_ciphers on;
+ssl_session_timeout 1d;
+ssl_session_cache shared:MozSSL:10m;
+ssl_session_tickets off;
+
+server {
+    server_name $DOMAIN;
+    listen unix:/dev/shm/nginx.sock ssl proxy_protocol;
+    http2 on;
+
+    ssl_certificate         /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key     /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+
+    root $WEBROOT;
+    index index.html;
+    add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
+
+    location $XHTTP_PATH {
+        client_max_body_size 0;
+        proxy_set_header X-Real-IP \$proxy_protocol_addr;
+        proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_http_version 1.1;
+        client_body_timeout 5m;
+        proxy_read_timeout 315s;
+        proxy_send_timeout 5m;
+        proxy_pass http://unix:/dev/shm/xrxh.socket;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+}
+
+server {
+    listen unix:/dev/shm/nginx.sock ssl proxy_protocol default_server;
+    server_name _;
+    ssl_reject_handshake on;
+    return 444;
+}
+NGINX
+  ok "nginx.conf записан (домен $DOMAIN, путь $XHTTP_PATH → /dev/shm/xrxh.socket)"
+fi
+
+# =============================================================================
+step "10/11  Нода Remnawave"
 # =============================================================================
 cd "$INSTALL_DIR" || die "нет $INSTALL_DIR"
 
 # если в compose уже есть посторонние сервисы — это боевая нода со своей
 # обвязкой, её файл трогать нельзя
+COMPOSE_MARK="# generated-by: node-setup"
 OTHER_SVC=""
 if [ -f docker-compose.yml ]; then
-  OTHER_SVC="$(awk '/^services:/{f=1;next} f&&/^[A-Za-z]/{f=0} f&&/^  [A-Za-z0-9_.-]+:/{gsub(/[ :]/,"");print}' docker-compose.yml \
-               | grep -v '^remnanode$' | tr '\n' ' ' | sed 's/ *$//')"
+  # свой же файл (с нашим маркером) переписывать можно — там наш nginx,
+  # а вот чужую обвязку трогать нельзя
+  if ! grep -qF "$COMPOSE_MARK" docker-compose.yml; then
+    OTHER_SVC="$(awk '/^services:/{f=1;next} f&&/^[A-Za-z]/{f=0} f&&/^  [A-Za-z0-9_.-]+:/{gsub(/[ :]/,"");print}' docker-compose.yml \
+                 | grep -v '^remnanode$' | tr '\n' ' ' | sed 's/ *$//')"
+  fi
 fi
 
 if [ -n "$OTHER_SVC" ]; then
@@ -684,6 +1043,7 @@ ENV
   ok ".env записан (ключ ${#SECRET_KEY} симв.)"
 
   cat > docker-compose.yml <<COMPOSE
+$COMPOSE_MARK
 services:
   remnanode:
     image: $NODE_IMAGE
@@ -700,8 +1060,36 @@ services:
       options: { max-size: 100m, max-file: "5" }
     volumes:
       - /dev/shm:/dev/shm:rw
+      - /etc/letsencrypt:/etc/letsencrypt:ro
 COMPOSE
-  ok "docker-compose.yml записан"
+
+  # nginx нужен только в связке с доменом: он отдаёт сайт-заглушку и
+  # проксирует путь Xray с unix-сокета
+  if [ "$DO_NGINX" = "1" ]; then
+    cat >> docker-compose.yml <<COMPOSE
+
+  remnawave-nginx:
+    image: $NGINX_IMAGE
+    container_name: remnawave-nginx
+    hostname: remnawave-nginx
+    restart: always
+    network_mode: host
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    logging:
+      driver: json-file
+      options: { max-size: 100m, max-file: "5" }
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - $WEBROOT:$WEBROOT:ro
+      - /dev/shm:/dev/shm:rw
+    command: sh -c 'rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
+COMPOSE
+    ok "docker-compose.yml записан (нода + nginx)"
+  else
+    ok "docker-compose.yml записан (только нода)"
+  fi
 
   if docker compose pull -q >/dev/null 2>&1; then
     ok "образ $NODE_IMAGE скачан"
@@ -713,7 +1101,7 @@ COMPOSE
 fi
 
 # =============================================================================
-step "8/8  Проверка"
+step "11/11  Проверка"
 # =============================================================================
 sleep 6
 CT_STATUS="$(docker ps --filter name=remnanode --format '{{.Status}}' 2>/dev/null)"
@@ -734,7 +1122,37 @@ if printf '%s' "$NLOG2" | grep -qi 'alert number 40\|handshake failure'; then
 fi
 printf '%s' "$NLOG2" | grep -qi 'unauthorized\|invalid secret' && err "панель не пускает ноду — SECRET_KEY не подходит"
 LOGERR="$(printf '%s' "$NLOG2" | grep -iE 'error|invalid|unauthor' | head -3)"
-[ -n "$LOGERR" ] && { warn "в логах ноды есть ошибки:"; printf '      %s\n' "$LOGERR"; }
+if [ -n "$LOGERR" ]; then
+  warn "в логах ноды есть ошибки:"
+  printf '%s\n' "$LOGERR" | cut -c1-150 | sed 's/^/      /'
+fi
+
+if [ "$DO_NGINX" = "1" ]; then
+  NG_STATUS="$(docker ps --filter name=remnawave-nginx --format '{{.Status}}' 2>/dev/null)"
+  if [ -n "$NG_STATUS" ]; then ok "remnawave-nginx: $NG_STATUS"
+  else err "контейнер remnawave-nginx не запущен"; docker logs --tail 15 remnawave-nginx 2>&1 | sed 's/^/      /'; fi
+
+  if docker exec remnawave-nginx nginx -t >/dev/null 2>&1; then
+    ok "конфиг nginx валиден"
+  else
+    err "nginx -t не прошёл:"
+    docker exec remnawave-nginx nginx -t 2>&1 | sed 's/^/      /'
+  fi
+
+  # сокет nginx появляется сразу, а сокет Xray — только когда панель отдаст
+  # ноде конфиг с этим inbound
+  [ -S /dev/shm/nginx.sock ] && ok "сокет /dev/shm/nginx.sock поднят" || err "сокета /dev/shm/nginx.sock нет"
+  if [ -S /dev/shm/xrxh.socket ]; then
+    ok "сокет Xray /dev/shm/xrxh.socket на месте"
+  else
+    warn "сокета /dev/shm/xrxh.socket ещё нет — появится, когда панель привяжет inbound к ноде"
+  fi
+
+  [ -f "$WEBROOT/index.html" ] && ok "сайт-заглушка на месте: $WEBROOT/index.html" || warn "сайта в $WEBROOT нет"
+
+  CERT_TILL="$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+  [ -n "$CERT_TILL" ] && ok "сертификат $DOMAIN годен до $CERT_TILL"
+fi
 
 # #############################################################################
 part "ИТОГ"
@@ -744,6 +1162,12 @@ say "  ОС          : $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}"
 say "  Docker      : $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,)"
 say "  Каталог     : $INSTALL_DIR"
 say "  Образ ноды  : $NODE_IMAGE"
+if [ "$DO_NGINX" = "1" ]; then
+  say "  Домен       : $DOMAIN  (сертификат до ${CERT_TILL:-—})"
+  say "  Сайт        : $WEBROOT — «${SITE_NAME:-—}», тема ${SITE_THEME:-—}"
+  say "  nginx       : ${NG_STATUS:-не запущен}"
+  say "  Путь Xray   : $XHTTP_PATH → unix:/dev/shm/xrxh.socket"
+fi
 if [ -n "$OLD_PORT" ] && [ "$OLD_PORT" != "$NODE_PORT" ]; then
   say "  Порт ноды   : $NODE_PORT  (был $OLD_PORT — поменяй его и в панели!)  (панель: ${PANEL_IP:-любой IP})"
 else
