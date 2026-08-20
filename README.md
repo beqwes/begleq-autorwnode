@@ -4,6 +4,36 @@
 потом настраивает его с нуля. Ничего ставить у себя на машину не нужно —
 скрипт кладётся на сервер и запускается там.
 
+## Установка одной командой
+
+На сервере, от root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/beqwes/begleq-autorwnode/main/node-setup.sh -o node-setup.sh && bash node-setup.sh
+```
+
+Скрипт останется в текущем каталоге — им же потом удобно перепроверять ноду.
+
+Совсем без файла, сразу в пайп:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/beqwes/begleq-autorwnode/main/node-setup.sh | bash
+```
+
+Вопросы читаются с `/dev/tty`, поэтому и через пайп скрипт остаётся интерактивным.
+Флаги в этом случае передаются через `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/beqwes/begleq-autorwnode/main/node-setup.sh | bash -s -- --status-only
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/beqwes/begleq-autorwnode/main/node-setup.sh | bash -s -- --domain fl.example.tld --panel-ip 203.0.113.10 --yes
+```
+
+Повторный запуск той же командой обновляет скрипт и перенастраивает ноду —
+существующий ключ и чужой compose при этом не трогаются.
+
 ## Запуск
 
 ```bash
