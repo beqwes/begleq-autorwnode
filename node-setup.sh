@@ -16,19 +16,26 @@
 # =============================================================================
 set -u
 
-VERSION="2.0"
+VERSION="2.1"
 STAMP="$(date +%s)"
 FAILED=""
 
 # ---------- параметры (можно задать флагом или переменной окружения) ---------
 SECRET_KEY="${SECRET_KEY:-}"
-NODE_PORT="${NODE_PORT:-2222}"
+# NODE_PORT и TIMEZONE намеренно пустые: ask() не задаёт вопрос, если
+# переменная уже заполнена, и с дефолтом прямо здесь порт нельзя было бы
+# поменять руками. Значения по умолчанию подставляются в самом вопросе.
+NODE_PORT="${NODE_PORT:-}"
 PANEL_IP="${PANEL_IP:-}"
 SSH_PORT="${SSH_PORT:-}"
 NEW_HOSTNAME="${NEW_HOSTNAME:-}"
-TIMEZONE="${TIMEZONE:-Europe/Moscow}"
+TIMEZONE="${TIMEZONE:-}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/remnanode}"
 LAST_COUNT="${LAST_COUNT:-10}"
+# образ ноды намеренно пинится, а не latest: свежий node с панелью постарше
+# не сходится по mTLS и валится с «tls alert handshake failure ... alert number 40»
+NODE_IMAGE="${NODE_IMAGE:-}"
+NODE_IMAGE_DEFAULT="remnawave/node:3.2.2"
 DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1
 FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0
 
@@ -51,7 +58,9 @@ node-setup.sh — отчёт о ноде и её первоначальная н
 
   --secret <key>       SECRET_KEY из панели (можно вставить строку SECRET_KEY=...)
   --panel-ip <ip>      IP панели; порт ноды откроется только ему
-  --node-port <port>   порт связи с панелью (по умолчанию 2222)
+  --node-port <port>   порт связи с панелью (по умолчанию 2222, спросит при запуске)
+  --node-version <tag> версия образа ноды, например 3.2.2 или latest
+  --node-image <ref>   образ целиком, если нужен свой реестр
   --hostname <name>    переименовать сервер
   --timezone <tz>      часовой пояс (по умолчанию Europe/Moscow)
   --dir <path>         каталог ноды (по умолчанию /opt/remnanode)
@@ -73,6 +82,8 @@ while [ $# -gt 0 ]; do
     --secret)      SECRET_KEY="${2:-}"; shift 2;;
     --panel-ip)    PANEL_IP="${2:-}"; shift 2;;
     --node-port)   NODE_PORT="${2:-}"; shift 2;;
+    --node-version) NODE_IMAGE="remnawave/node:${2:-}"; shift 2;;
+    --node-image)  NODE_IMAGE="${2:-}"; shift 2;;
     --hostname)    NEW_HOSTNAME="${2:-}"; shift 2;;
     --timezone)    TIMEZONE="${2:-}"; shift 2;;
     --dir)         INSTALL_DIR="${2:-}"; shift 2;;
@@ -93,12 +104,15 @@ done
 [ "$(id -u)" = "0" ] || die "нужен root"
 
 # вопросы читаем с терминала, чтобы работало и через  curl ... | bash
+# проверка именно попыткой открыть: /dev/tty существует всегда, но без
+# управляющего терминала (ssh host < script, plink -m, cron) не открывается
 TTY_IN=""
-[ -r /dev/tty ] && TTY_IN=/dev/tty
+if { : < /dev/tty; } 2>/dev/null; then TTY_IN=/dev/tty; fi
 interactive() { [ "$ASSUME_YES" = 1 ] && return 1; [ -n "$TTY_IN" ] && return 0; return 1; }
 
 ask() {   # ask ПЕРЕМЕННАЯ "вопрос" "дефолт"
-  local __var="$1" __q="$2" __def="${3:-}" __cur __ans
+  # __ans инициализируем: если read сорвётся, при set -u скрипт бы упал
+  local __var="$1" __q="$2" __def="${3:-}" __cur="" __ans=""
   eval "__cur=\${$__var:-}"
   [ -n "$__cur" ] && return 0
   if ! interactive; then eval "$__var=\"\$__def\""; return 0; fi
@@ -109,8 +123,14 @@ ask() {   # ask ПЕРЕМЕННАЯ "вопрос" "дефолт"
   eval "$__var=\"\$__ans\""
 }
 confirm() {   # confirm "вопрос" y|n
-  local q="$1" def="${2:-y}" a
-  interactive || return 0
+  local q="$1" def="${2:-y}" a=""
+  # без терминала молчание НЕ значит согласие: менять что-то на сервере
+  # можно только с явным --yes, иначе «нет». Иначе запуск без tty
+  # (ssh host < script, plink -m, curl | bash в cron) начнёт настройку сам.
+  if ! interactive; then
+    [ "$ASSUME_YES" = 1 ] && return 0
+    return 1
+  fi
   printf '%s?%s %s [y/n, по умолчанию %s]: ' "$CC" "$C0" "$q" "$def"
   IFS= read -r a < "$TTY_IN" || true
   a="${a:-$def}"
@@ -188,6 +208,83 @@ if command -v docker >/dev/null 2>&1; then
   done
 else
   warn "docker не установлен"
+fi
+
+# =============================================================================
+step "Здоровье ноды"
+# =============================================================================
+if command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -aq --filter name=remnanode 2>/dev/null)" ]; then
+  N_IMG="$(docker inspect -f '{{.Config.Image}}' remnanode 2>/dev/null)"
+  N_ST="$(docker inspect -f '{{.State.Status}}' remnanode 2>/dev/null)"
+  N_HL="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' remnanode 2>/dev/null)"
+  N_RC="$(docker inspect -f '{{.RestartCount}}' remnanode 2>/dev/null)"
+  case "$N_IMG" in
+    *:latest) warn "образ: $N_IMG — тег latest, при обновлении может разойтись с панелью" ;;
+    *:*)      ok   "образ: $N_IMG" ;;
+    *)        warn "образ: $N_IMG — тег не указан, версия не зафиксирована" ;;
+  esac
+  if [ "$N_ST" = "running" ]; then ok "контейнер: running, рестартов ${N_RC:-0}${N_HL:+, health: $N_HL}"
+  else bad "контейнер: ${N_ST:-нет}, рестартов ${N_RC:-0}"; fi
+
+  # порт связи с панелью
+  P_CUR=""
+  [ -f "$INSTALL_DIR/.env" ] && P_CUR="$(grep -E '^[[:space:]]*(NODE_PORT|APP_PORT)=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2 | tr -d '"'\''[:space:]')"
+  [ -z "$P_CUR" ] && P_CUR=2222
+  if [ -n "$(ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -x "$P_CUR" | head -1)" ]; then
+    ok "порт панели $P_CUR слушается"
+  else
+    bad "порт панели $P_CUR не слушается"
+  fi
+
+  # разбор логов: типовые поломки видно сразу
+  # логи ноды идут с ANSI-раскраской и нулевыми байтами — чистим,
+  # иначе bash ругается «ignored null byte» и вывод разъезжается
+  NLOG="$(docker logs --tail 200 remnanode 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g')"
+  if printf '%s' "$NLOG" | grep -qi 'alert number 40\|handshake failure'; then
+    bad "mTLS не сходится: панель и нода разных версий (SSL alert 40)"
+    say "      лечится пином версии образа:  bash node-setup.sh --node-version 3.2.2"
+  fi
+  printf '%s' "$NLOG" | grep -qi 'unauthorized\|invalid secret\|jwt' && bad "панель не пускает: похоже, SECRET_KEY не тот"
+  printf '%s' "$NLOG" | grep -qi 'xray.*started\|core.*started' && ok "ядро Xray стартовало"
+  LASTERR="$(printf '%s' "$NLOG" | grep -iE 'error|panic|fatal' | tail -2)"
+  if [ -n "$LASTERR" ]; then
+    warn "последние ошибки в логе ноды:"
+    printf '%s\n' "$LASTERR" | cut -c1-150 | sed 's/^/      /'
+  fi
+
+  # сколько сейчас клиентских соединений
+  EST="$(ss -tnH state established 2>/dev/null | wc -l)"
+  EST443="$(ss -tnH state established '( sport = :443 )' 2>/dev/null | wc -l)"
+  say "  соединений: всего $EST, из них на :443 — $EST443"
+else
+  warn "контейнер remnanode не найден — нода ещё не настроена"
+fi
+
+# трафик с момента загрузки: показывает, работает ли нода вообще
+IFACE="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+if [ -n "$IFACE" ]; then
+  awk -v i="$IFACE" '$1 ~ "^"i":" {
+      gsub(/.*:/, "", $1);
+      printf "  трафик %s: принято %.1f ГиБ, отдано %.1f ГиБ (с момента загрузки)\n", i, $2/1073741824, $10/1073741824
+    }' /proc/net/dev
+fi
+if command -v vnstat >/dev/null 2>&1; then
+  vnstat --oneline 2>/dev/null | awk -F';' 'NF>10 {printf "  vnstat: сегодня %s, за месяц %s\n", $6, $11}'
+fi
+
+# сертификаты, если нода стоит за своим nginx
+if [ -d /etc/letsencrypt/live ]; then
+  for d in /etc/letsencrypt/live/*/; do
+    [ -f "$d/fullchain.pem" ] || continue
+    END="$(openssl x509 -enddate -noout -in "$d/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+    END_TS="$(date -d "$END" +%s 2>/dev/null)"
+    NOW_TS="$(date +%s)"
+    DAYS=$(( (END_TS - NOW_TS) / 86400 ))
+    NAME="$(basename "$d")"
+    if   [ "$DAYS" -lt 7 ];  then bad  "сертификат $NAME истекает через $DAYS дн."
+    elif [ "$DAYS" -lt 21 ]; then warn "сертификат $NAME истекает через $DAYS дн."
+    else                          ok   "сертификат $NAME годен ещё $DAYS дн."; fi
+  done
 fi
 
 # =============================================================================
@@ -313,18 +410,74 @@ while [ -z "$SECRET_KEY" ]; do
   interactive || break
 done
 
-ask NODE_PORT    "Порт связи с панелью" "2222"
-ask PANEL_IP     "IP панели Remnawave (Enter — порт откроется всем)" ""
-ask NEW_HOSTNAME "Новое имя сервера (Enter — оставить $(hostname))" ""
-ask TIMEZONE     "Часовой пояс" "Europe/Moscow"
-
-# порт SSH определяем сам, чтобы не отрезать себе доступ правилом ufw
+# порт SSH определяем первым: он нужен и для правила ufw, и чтобы не дать
+# занять им же порт ноды
 if [ -z "$SSH_PORT" ]; then
   SSH_PORT="$(echo "${SSH_CONNECTION:-}" | awk '{print $4}')"
   [ -z "$SSH_PORT" ] && SSH_PORT="$(ss -tlnpH 2>/dev/null | awk '/"sshd"/{print $4}' | sed 's/.*://' | head -1)"
   [ -z "$SSH_PORT" ] && SSH_PORT="$(awk '/^Port /{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)"
   [ -z "$SSH_PORT" ] && SSH_PORT=22
 fi
+
+# --- порт ноды: если он уже настроен, предлагаем его же, а не 2222 ---
+OLD_PORT=""
+[ -f "$INSTALL_DIR/.env" ] && OLD_PORT="$(grep -E '^[[:space:]]*(NODE_PORT|APP_PORT)=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2 | tr -d '"'\''[:space:]')"
+if [ -z "$OLD_PORT" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+  OLD_PORT="$(grep -oE '(NODE_PORT|APP_PORT)[[:space:]]*[:=][[:space:]]*[0-9]{2,5}' "$INSTALL_DIR/docker-compose.yml" \
+              | head -1 | grep -oE '[0-9]{2,5}$')"
+fi
+[ -n "$OLD_PORT" ] && ok "сейчас нода настроена на порт $OLD_PORT"
+
+valid_port() {
+  case "${1:-}" in ''|*[!0-9]*) return 1;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+while :; do
+  ask NODE_PORT "Порт связи с панелью" "${OLD_PORT:-2222}"
+  if ! valid_port "$NODE_PORT"; then
+    bad "порт должен быть числом от 1 до 65535, а не «$NODE_PORT»"
+  elif [ "$NODE_PORT" = "$SSH_PORT" ]; then
+    bad "порт $NODE_PORT занят SSH — возьми другой"
+  else
+    # порт может быть занят кем-то посторонним: своя же нода не в счёт
+    BUSY="$(ss -tlnpH 2>/dev/null | awk -v p=":$NODE_PORT" '$4 ~ p"$" {print $0}' | grep -v 'rw-node\|remnanode' | head -1)"
+    if [ -n "$BUSY" ]; then
+      warn "порт $NODE_PORT уже слушает: $(printf '%s' "$BUSY" | grep -oE 'users:\(\("[^"]+' | sed 's/.*"//')"
+      confirm "Всё равно занять его под ноду?" n && break
+    else
+      break
+    fi
+  fi
+  interactive || die "порт $NODE_PORT не подходит"
+  NODE_PORT=""
+done
+[ -n "$OLD_PORT" ] && [ "$OLD_PORT" != "$NODE_PORT" ] && warn "порт меняется: $OLD_PORT → $NODE_PORT (не забудь поправить его в панели)"
+
+# --- версия образа: latest сплошь и рядом расходится с версией панели ---
+OLD_IMAGE=""
+[ -f "$INSTALL_DIR/docker-compose.yml" ] && OLD_IMAGE="$(grep -oE 'image:[[:space:]]*[^[:space:]]+' "$INSTALL_DIR/docker-compose.yml" | grep -i 'remnawave/node' | head -1 | sed -E 's/image:[[:space:]]*//')"
+[ -n "$OLD_IMAGE" ] && ok "сейчас стоит образ $OLD_IMAGE"
+if [ -z "$NODE_IMAGE" ]; then
+  say ""
+  say "  Версия ноды должна совпадать с версией панели, иначе mTLS не сойдётся"
+  say "  и в логах будет «tls alert handshake failure ... alert number 40»."
+  say "  latest сейчас 3.3.x; с панелями 2.8.x рабочая связка — 3.2.2."
+fi
+ask NODE_IMAGE "Образ ноды" "${OLD_IMAGE:-$NODE_IMAGE_DEFAULT}"
+case "$NODE_IMAGE" in
+  *:*) : ;;                                   # уже с тегом
+  */*) NODE_IMAGE="$NODE_IMAGE:latest" ;;     # репозиторий без тега
+  *)   NODE_IMAGE="remnawave/node:$NODE_IMAGE" ;;  # ввели просто «3.2.2»
+esac
+case "$NODE_IMAGE" in
+  *:latest) warn "берётся latest — при следующем обновлении может разойтись с панелью" ;;
+esac
+[ -n "$OLD_IMAGE" ] && [ "$OLD_IMAGE" != "$NODE_IMAGE" ] && warn "образ меняется: $OLD_IMAGE → $NODE_IMAGE"
+
+ask PANEL_IP     "IP панели Remnawave (Enter — порт откроется всем)" ""
+ask NEW_HOSTNAME "Новое имя сервера (Enter — оставить $(hostname))" ""
+ask TIMEZONE     "Часовой пояс" "Europe/Moscow"
 
 say ""
 say "  ${CB}Итого:${C0}"
@@ -335,7 +488,10 @@ say "     ключ        ${SECRET_KEY:0:10}… (${#SECRET_KEY} симв.)"
 say "     имя сервера ${NEW_HOSTNAME:-$(hostname) — без изменений}"
 say "     часовой пояс $TIMEZONE"
 say "     обновление пакетов: $([ "$DO_UPGRADE" = 1 ] && echo да || echo нет)   ufw: $([ "$DO_UFW" = 1 ] && echo да || echo нет)   fail2ban: $([ "$DO_F2B" = 1 ] && echo да || echo нет)   swap: $([ "$DO_SWAP" = 1 ] && echo да || echo нет)"
-confirm "Начинать настройку?" y || die "отменено"
+if ! confirm "Начинать настройку?" y; then
+  if interactive; then die "отменено"; fi
+  die "нет терминала для подтверждения — запусти из консоли сервера либо добавь --yes"
+fi
 
 # #############################################################################
 part "ЧАСТЬ 3: настройка"
@@ -454,6 +610,12 @@ elif ! command -v ufw >/dev/null 2>&1; then
   warn "ufw не установлен"
 else
   ufw allow "${SSH_PORT}/tcp" comment 'SSH' >/dev/null 2>&1
+  # порт сменился — старое разрешение надо убрать, иначе останется открытым
+  if [ -n "$OLD_PORT" ] && [ "$OLD_PORT" != "$NODE_PORT" ]; then
+    ufw --force delete allow "${OLD_PORT}/tcp" >/dev/null 2>&1
+    [ -n "$PANEL_IP" ] && ufw --force delete allow from "$PANEL_IP" to any port "$OLD_PORT" >/dev/null 2>&1
+    ok "старое правило на порт $OLD_PORT удалено"
+  fi
   if [ -n "$PANEL_IP" ]; then
     ufw allow from "$PANEL_IP" to any port "$NODE_PORT" comment 'remnawave panel' >/dev/null 2>&1
     ok "порт ноды $NODE_PORT открыт только для $PANEL_IP"
@@ -521,10 +683,10 @@ ENV
   chmod 600 .env
   ok ".env записан (ключ ${#SECRET_KEY} симв.)"
 
-  cat > docker-compose.yml <<'COMPOSE'
+  cat > docker-compose.yml <<COMPOSE
 services:
   remnanode:
-    image: remnawave/node:latest
+    image: $NODE_IMAGE
     container_name: remnanode
     hostname: remnanode
     restart: always
@@ -541,7 +703,12 @@ services:
 COMPOSE
   ok "docker-compose.yml записан"
 
-  docker compose pull -q >/dev/null 2>&1
+  if docker compose pull -q >/dev/null 2>&1; then
+    ok "образ $NODE_IMAGE скачан"
+  else
+    err "образ $NODE_IMAGE не скачался — проверь, что такой тег существует"
+    say "      список версий: https://hub.docker.com/r/remnawave/node/tags"
+  fi
   docker compose up -d >/dev/null 2>&1 && ok "контейнер поднят" || err "docker compose up упал"
 fi
 
@@ -558,7 +725,15 @@ LISTEN="$(ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -x "$NO
 if [ -n "$LISTEN" ]; then ok "порт $NODE_PORT слушается"
 else err "порт $NODE_PORT не слушается"; fi
 
-LOGERR="$(docker logs --tail 30 remnanode 2>&1 | grep -iE 'error|invalid|unauthor' | head -3)"
+NLOG2="$(docker logs --tail 60 remnanode 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g')"
+if printf '%s' "$NLOG2" | grep -qi 'alert number 40\|handshake failure'; then
+  err "mTLS с панелью не сошёлся (SSL alert 40) — версии ноды и панели разные"
+  say "      сейчас стоит $NODE_IMAGE; попробуй другую версию, например:"
+  say "      bash node-setup.sh --node-version 3.2.2 --yes"
+  say "      посмотреть версию панели: в её веб-интерфейсе внизу или docker inspect на сервере панели"
+fi
+printf '%s' "$NLOG2" | grep -qi 'unauthorized\|invalid secret' && err "панель не пускает ноду — SECRET_KEY не подходит"
+LOGERR="$(printf '%s' "$NLOG2" | grep -iE 'error|invalid|unauthor' | head -3)"
 [ -n "$LOGERR" ] && { warn "в логах ноды есть ошибки:"; printf '      %s\n' "$LOGERR"; }
 
 # #############################################################################
@@ -568,7 +743,12 @@ say "  Хост        : $(hostname)"
 say "  ОС          : $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}")"
 say "  Docker      : $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,)"
 say "  Каталог     : $INSTALL_DIR"
-say "  Порт ноды   : $NODE_PORT  (панель: ${PANEL_IP:-любой IP})"
+say "  Образ ноды  : $NODE_IMAGE"
+if [ -n "$OLD_PORT" ] && [ "$OLD_PORT" != "$NODE_PORT" ]; then
+  say "  Порт ноды   : $NODE_PORT  (был $OLD_PORT — поменяй его и в панели!)  (панель: ${PANEL_IP:-любой IP})"
+else
+  say "  Порт ноды   : $NODE_PORT  (панель: ${PANEL_IP:-любой IP})"
+fi
 say "  SECRET_KEY  : ${SECRET_KEY:0:10}… (${#SECRET_KEY} симв.)"
 say "  Контейнер   : ${CT_STATUS:-не запущен}"
 say "  UFW         : $(ufw status 2>/dev/null | head -1)"
