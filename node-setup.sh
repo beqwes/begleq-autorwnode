@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="2.4"
+VERSION="2.5"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -814,7 +814,10 @@ step "8/11  Сайт-заглушка"
 if [ "$DO_NGINX" != "1" ] || [ "$DO_SITE" != "1" ]; then
   warn "пропущено"
 elif [ -f "$WEBROOT/index.html" ] && [ "$FORCE_SITE" != "1" ]; then
-  ok "сайт в $WEBROOT уже есть — не трогаю (--force-site чтобы перезаписать)"
+  # вытащим название из <title>, иначе в сводке будет пустой прочерк
+  SITE_NAME="$(grep -m1 -oE '<title>[^<]*</title>' "$WEBROOT/index.html" 2>/dev/null                | sed -E 's|</?title>||g; s/.*— //')"
+  [ -z "$SITE_NAME" ] && SITE_NAME="уже был"
+  ok "сайт в $WEBROOT уже есть («$SITE_NAME») — не трогаю (--force-site чтобы перезаписать)"
 else
   [ -d "$WEBROOT" ] && [ -n "$(ls -A "$WEBROOT" 2>/dev/null)" ] && {
     cp -a "$WEBROOT" "${WEBROOT}.bak.$STAMP"; ok "старый сайт → ${WEBROOT}.bak.$STAMP"; }
@@ -1120,6 +1123,9 @@ NGINX
     ok "заглушка также слушает 127.0.0.1:$FALLBACK_PORT (для dest вида 127.0.0.1:$FALLBACK_PORT)"
   fi
   ok "nginx.conf записан (домен $DOMAIN, путь $XHTTP_PATH → /dev/shm/xrxh.socket)"
+  if ! [ -f "$CERT_DIR/fullchain.pem" ]; then
+    warn "сертификата ещё нет — nginx будет падать по кругу, пока он не появится"
+  fi
 fi
 
 # =============================================================================
@@ -1217,6 +1223,24 @@ COMPOSE
     say "      список версий: https://hub.docker.com/r/remnawave/node/tags"
   fi
   docker compose up -d >/dev/null 2>&1 && ok "контейнер поднят" || err "docker compose up упал"
+
+  # nginx мог крутиться в цикле падений, пока сертификата ещё не было: docker
+  # наращивает паузу между попытками, и сам он поднимется нескоро. Раз сертификат
+  # уже на месте — перезапускаем принудительно и ждём, пока встанет
+  if [ "$DO_NGINX" = "1" ] && [ -f "$CERT_DIR/fullchain.pem" ]; then
+    NG_STATE="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
+    if [ "$NG_STATE" != "running" ]; then
+      docker restart remnawave-nginx >/dev/null 2>&1
+      i=0
+      while [ "$i" -lt 15 ]; do
+        NG_STATE="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
+        [ "$NG_STATE" = "running" ] && break
+        sleep 2; i=$((i+1))
+      done
+      [ "$NG_STATE" = "running" ] && ok "nginx перезапущен после появления сертификата" \
+        || warn "nginx всё ещё не поднялся (состояние: ${NG_STATE:-нет})"
+    fi
+  fi
 fi
 
 # =============================================================================
@@ -1251,7 +1275,18 @@ if [ "$DO_NGINX" = "1" ]; then
   if [ -n "$NG_STATUS" ]; then ok "remnawave-nginx: $NG_STATUS"
   else err "контейнер remnawave-nginx не запущен"; docker logs --tail 15 remnawave-nginx 2>&1 | sed 's/^/      /'; fi
 
-  if docker exec remnawave-nginx nginx -t >/dev/null 2>&1; then
+  # в контейнер, который перезапускается, через exec не зайти — тогда nginx -t
+  # молча выдаёт пустоту, а настоящая причина лежит в логах контейнера
+  NG_STATE="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
+  if [ "$NG_STATE" != "running" ]; then
+    err "nginx не работает (состояние: ${NG_STATE:-нет контейнера}), из логов:"
+    docker logs --tail 40 remnawave-nginx 2>&1 | tr -d '\000' | grep -iE 'emerg|error' \
+      | tail -2 | cut -c1-200 | sed 's/^/      /'
+    if ! [ -f "$CERT_DIR/fullchain.pem" ]; then
+      say "      сертификата ${CERT_DIR}/fullchain.pem нет — сначала выпусти его,"
+      say "      затем перезапусти: cd $INSTALL_DIR && docker compose up -d"
+    fi
+  elif docker exec remnawave-nginx nginx -t >/dev/null 2>&1; then
     ok "конфиг nginx валиден"
   else
     err "nginx -t не прошёл:"
