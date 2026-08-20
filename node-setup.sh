@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="2.3"
+VERSION="2.4"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -42,6 +42,9 @@ DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
 SITE_THEME="${SITE_THEME:-}"
 XHTTP_PATH="${XHTTP_PATH:-/api/v3/media}"
+# Reality-инбаунд отдаёт «украденный» сайт по адресу из dest. Панели пишут туда
+# либо unix-сокет, либо 127.0.0.1:9443 — поэтому слушаем оба варианта сразу
+FALLBACK_PORT="${FALLBACK_PORT:-9443}"
 WEBROOT="${WEBROOT:-/var/www/html}"
 DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1
 FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0
@@ -71,6 +74,7 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --domain <host>      self-steal домен ноды: сертификат, nginx и сайт-заглушка
   --email <mail>       почта для Let's Encrypt (по умолчанию admin@домен)
   --xhttp-path <path>  путь, который nginx отдаёт Xray (по умолчанию /api/v3/media)
+  --fallback-port <p>  локальный порт для dest у Reality (по умолчанию 9443, 0 — выключить)
   --site-theme <t>     тема заглушки: media, files, studio, shop (по умолчанию случайная)
   --force-site         перезаписать уже существующий сайт в /var/www/html
   --no-nginx           не ставить nginx и не выпускать сертификат
@@ -101,6 +105,7 @@ while [ $# -gt 0 ]; do
     --domain)      DOMAIN="${2:-}"; shift 2;;
     --email)       EMAIL="${2:-}"; shift 2;;
     --xhttp-path)  XHTTP_PATH="${2:-}"; shift 2;;
+    --fallback-port) FALLBACK_PORT="${2:-9443}"; shift 2;;
     --site-theme)  SITE_THEME="${2:-}"; shift 2;;
     --force-site)  FORCE_SITE=1; shift;;
     --no-nginx)    DO_NGINX=0; shift;;
@@ -156,6 +161,55 @@ confirm() {   # confirm "вопрос" y|n
   IFS= read -r a < "$TTY_IN" || true
   a="${a:-$def}"
   case "$a" in [yYдД]*) return 0;; *) return 1;; esac
+}
+
+# сверяем то, что панель реально отдала ядру, с тем, что настроено на ноде:
+# сайт-заглушку показывает Xray, а не nginx, поэтому SNI и dest должны сойтись
+check_panel_inbound() {
+  local args sock url cfg
+  args="$(tr '\0' ' ' < /proc/"$(pgrep -f rw-core | head -1)"/cmdline 2>/dev/null)"
+  sock="$(printf '%s' "$args" | grep -oE '@rwint-[A-Za-z0-9]+' | head -1 | sed 's/^@//')"
+  url="$(printf '%s' "$args" | grep -oE '/internal/get-config\?token=[A-Za-z0-9]+' | head -1)"
+  if [ -z "$sock" ] || [ -z "$url" ]; then
+    warn "не смог прочитать живой конфиг Xray — проверь инбаунд в панели вручную"
+    return 0
+  fi
+  cfg="$(curl -s --max-time 8 --abstract-unix-socket "$sock" "http://localhost$url" 2>/dev/null)"
+  if [ -z "$cfg" ]; then
+    warn "панель ещё не отдала ноде конфиг — привяжи ноду к инбаунду"
+    return 0
+  fi
+
+  local names dests
+  names="$(printf '%s' "$cfg" | grep -oE '"serverNames"[^]]*]' | grep -oE '"[a-z0-9.-]+\.[a-z]{2,}"' | tr -d '"' | sort -u | tr '\n' ' ')"
+  dests="$(printf '%s' "$cfg" | grep -oE '"(dest|target)"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"[[:space:]]*:[[:space:]]*"//; s/"$//' | sort -u | tr '\n' ' ')"
+
+  say "  инбаунд из панели: SNI [${names:-нет}] → dest [${dests:-нет}]"
+
+  case " $names " in
+    *" $DOMAIN "*) ok "домен $DOMAIN есть в serverNames инбаунда" ;;
+    *)
+      err "домена $DOMAIN нет в serverNames инбаунда — Reality рвёт чужой SNI, заглушка не покажется"
+      say "      в панели: инбаунд этой ноды → serverNames должен содержать $DOMAIN"
+      ;;
+  esac
+
+  local dest_ok=0
+  case " $dests " in
+    *"/dev/shm/nginx.sock"*) dest_ok=1; ok "dest указывает на наш сокет /dev/shm/nginx.sock" ;;
+  esac
+  if [ "$dest_ok" = 0 ] && [ "${FALLBACK_PORT:-0}" != "0" ]; then
+    case " $dests " in
+      *"127.0.0.1:$FALLBACK_PORT"*|*"localhost:$FALLBACK_PORT"*)
+        dest_ok=1; ok "dest указывает на 127.0.0.1:$FALLBACK_PORT — этот порт мы слушаем" ;;
+    esac
+  fi
+  if [ "$dest_ok" = 0 ]; then
+    err "dest инбаунда ведёт не к заглушке (${dests:-пусто})"
+    say "      варианты: поставить в панели dest = /dev/shm/nginx.sock с proxyProtocol,"
+    say "      либо dest = 127.0.0.1:$FALLBACK_PORT, либо перезапустить скрипт с"
+    say "      --fallback-port <порт из dest>"
+  fi
 }
 
 say "${CB}node-setup v$VERSION${C0} — $(hostname), $(date '+%d.%m.%Y %H:%M %Z')"
@@ -271,6 +325,15 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -aq --filter name=remn
   if [ -n "$LASTERR" ]; then
     warn "последние ошибки в логе ноды:"
     printf '%s\n' "$LASTERR" | cut -c1-150 | sed 's/^/      /'
+  fi
+
+  # сверка с панелью: домен берём из уже лежащего nginx.conf, если не задан флагом
+  if [ -z "${DOMAIN:-}" ] && [ -f "$INSTALL_DIR/nginx.conf" ]; then
+    DOMAIN="$(grep -m1 -E '^[[:space:]]*server_name[[:space:]]+[A-Za-z0-9.-]+;' "$INSTALL_DIR/nginx.conf" \
+              | sed -E 's/.*server_name[[:space:]]+//; s/;.*//')"
+  fi
+  if [ -n "${DOMAIN:-}" ]; then
+    check_panel_inbound
   fi
 
   # сколько сейчас клиентских соединений
@@ -1011,6 +1074,51 @@ server {
     return 444;
 }
 NGINX
+
+  # второй вход для панелей, где у Reality dest = 127.0.0.1:<порт>, а не сокет.
+  # Наружу порт не открывается — только петля, снаружи его не видно
+  if [ "${FALLBACK_PORT:-0}" != "0" ]; then
+    cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
+
+server {
+    server_name $DOMAIN;
+    listen 127.0.0.1:$FALLBACK_PORT ssl;
+    http2 on;
+
+    ssl_certificate         /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key     /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+
+    root $WEBROOT;
+    index index.html;
+    add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
+
+    location $XHTTP_PATH {
+        client_max_body_size 0;
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_http_version 1.1;
+        client_body_timeout 5m;
+        proxy_read_timeout 315s;
+        proxy_send_timeout 5m;
+        proxy_pass http://unix:/dev/shm/xrxh.socket;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+}
+
+server {
+    listen 127.0.0.1:$FALLBACK_PORT ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+    return 444;
+}
+NGINX
+    ok "заглушка также слушает 127.0.0.1:$FALLBACK_PORT (для dest вида 127.0.0.1:$FALLBACK_PORT)"
+  fi
   ok "nginx.conf записан (домен $DOMAIN, путь $XHTTP_PATH → /dev/shm/xrxh.socket)"
 fi
 
@@ -1163,6 +1271,10 @@ if [ "$DO_NGINX" = "1" ]; then
 
   CERT_TILL="$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
   [ -n "$CERT_TILL" ] && ok "сертификат $DOMAIN годен до $CERT_TILL"
+
+  # заглушку отдаёт не nginx напрямую, а Xray по правилам инбаунда из панели.
+  # Сверяем их: чаще всего сайт «не появляется» именно из-за настроек панели
+  check_panel_inbound
 fi
 
 # #############################################################################
