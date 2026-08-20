@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="2.5"
+VERSION="2.6"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -46,8 +46,8 @@ XHTTP_PATH="${XHTTP_PATH:-/api/v3/media}"
 # либо unix-сокет, либо 127.0.0.1:9443 — поэтому слушаем оба варианта сразу
 FALLBACK_PORT="${FALLBACK_PORT:-9443}"
 WEBROOT="${WEBROOT:-/var/www/html}"
-DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1
-FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0
+DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1
+FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0
 
 # ---------- вывод ----------
 if [ -t 1 ]; then C0=$'\e[0m'; CB=$'\e[1m'; CG=$'\e[32m'; CY=$'\e[33m'; CR=$'\e[31m'; CC=$'\e[36m'; CM=$'\e[35m'
@@ -79,6 +79,8 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --force-site         перезаписать уже существующий сайт в /var/www/html
   --no-nginx           не ставить nginx и не выпускать сертификат
   --no-site            не трогать сайт-заглушку
+  --no-motd            не ставить отчёт о ноде при входе по SSH
+  --motd-only          только поставить отчёт при входе и выйти
   --hostname <name>    переименовать сервер
   --timezone <tz>      часовой пояс (по умолчанию Europe/Moscow)
   --dir <path>         каталог ноды (по умолчанию /opt/remnanode)
@@ -110,6 +112,8 @@ while [ $# -gt 0 ]; do
     --force-site)  FORCE_SITE=1; shift;;
     --no-nginx)    DO_NGINX=0; shift;;
     --no-site)     DO_SITE=0; shift;;
+    --no-motd)     DO_MOTD=0; shift;;
+    --motd-only)   MOTD_ONLY=1; shift;;
     --hostname)    NEW_HOSTNAME="${2:-}"; shift 2;;
     --timezone)    TIMEZONE="${2:-}"; shift 2;;
     --dir)         INSTALL_DIR="${2:-}"; shift 2;;
@@ -212,7 +216,78 @@ check_panel_inbound() {
   fi
 }
 
+# ставит баннер о состоянии ноды, который показывается при входе по SSH
+install_motd() {
+if [ "$DO_MOTD" != "1" ]; then
+  warn "пропущено (--no-motd)"
+elif [ ! -d /etc/update-motd.d ]; then
+  warn "нет /etc/update-motd.d — баннер при входе не поставить"
+else
+  cat > /etc/update-motd.d/99-remnanode <<'MOTD'
+#!/bin/sh
+# Состояние ноды при входе по SSH. Поставлен node-setup.sh, убрать — просто удалить файл.
+command -v docker >/dev/null 2>&1 || exit 0
+
+G='\033[32m'; Y='\033[33m'; R='\033[31m'; C='\033[36m'; B='\033[1m'; N='\033[0m'
+TAB="$(printf '\t')"
+
+printf "%b\n" "${B}${C}=== контейнеры ===${N}"
+if [ -z "$(docker ps -aq 2>/dev/null)" ]; then
+  printf "%b\n" "  ${Y}!!${N}  контейнеров нет"
+else
+  docker ps -a --format "{{.Names}}${TAB}{{.Status}}${TAB}{{.Image}}" 2>/dev/null |
+  while IFS="$TAB" read -r name status image; do
+    case "$status" in
+      Up*restarting*|Restarting*) m="${R}xx${N}" ;;
+      Up*unhealthy*)              m="${R}xx${N}" ;;
+      Up*)                        m="${G}ok${N}" ;;
+      *)                          m="${Y}!!${N}" ;;
+    esac
+    printf "%b\n" "  $m  $(printf '%-20s %-26s %s' "$name" "$image" "$status")"
+  done
+fi
+
+PORT="$(grep -hE '^[[:space:]]*NODE_PORT=' /opt/remnanode/.env 2>/dev/null | head -1 | cut -d= -f2 | tr -d '\"'\"'\''[:space:]')"
+[ -z "$PORT" ] && PORT=2222
+if ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx "$PORT"; then
+  printf "%b\n" "  ${G}ok${N}  порт панели $PORT слушается"
+else
+  printf "%b\n" "  ${R}xx${N}  порт панели $PORT НЕ слушается"
+fi
+if ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx 443; then
+  printf "%b\n" "  ${G}ok${N}  443 занят Xray"
+else
+  printf "%b\n" "  ${Y}!!${N}  на 443 никто не слушает"
+fi
+[ -S /dev/shm/nginx.sock ]  && printf "%b\n" "  ${G}ok${N}  сокет nginx поднят" \
+                            || printf "%b\n" "  ${Y}!!${N}  сокета /dev/shm/nginx.sock нет"
+[ -S /dev/shm/xrxh.socket ] && printf "%b\n" "  ${G}ok${N}  сокет Xray поднят"
+
+for c in remnawave-nginx; do
+  st="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)"
+  [ -n "$st" ] && [ "$st" != "running" ] && {
+    printf "%b\n" "${B}${R}--- $c упал, причина: ---${N}"
+    docker logs --tail 40 "$c" 2>&1 | tr -d '\000' | grep -iE 'emerg|error' | tail -2 | cut -c1-160 | sed 's/^/  /'
+  }
+done
+
+printf "\n%b\n" "${B}${C}=== логи ноды, последние 25 строк ===${N}"
+docker logs --tail 25 remnanode 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-150 | sed 's/^/  /'
+printf "\n%b\n" "  подробный отчёт: ${B}bash /opt/remnanode/node-setup.sh --status-only${N}"
+MOTD
+  chmod +x /etc/update-motd.d/99-remnanode
+  ok "баннер при входе поставлен: /etc/update-motd.d/99-remnanode"
+fi
+}
+
 say "${CB}node-setup v$VERSION${C0} — $(hostname), $(date '+%d.%m.%Y %H:%M %Z')"
+
+if [ "$MOTD_ONLY" = "1" ]; then
+  install_motd
+  say ""
+  say "РЕЗУЛЬТАТ: ok"
+  exit 0
+fi
 
 # #############################################################################
 if [ "$NO_STATUS" != "1" ]; then
@@ -628,7 +703,7 @@ part "ЧАСТЬ 3: настройка"
 # #############################################################################
 
 # =============================================================================
-step "1/11  Имя, часовой пояс, время"
+step "1/12  Имя, часовой пояс, время"
 # =============================================================================
 if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$(hostname)" ]; then
   if hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null; then
@@ -644,7 +719,7 @@ fi
 timedatectl set-ntp true >/dev/null 2>&1
 
 # =============================================================================
-step "2/11  Пакеты"
+step "2/12  Пакеты"
 # =============================================================================
 apt-get update -qq 2>/dev/null && ok "apt update" || err "apt update не прошёл"
 if [ "$DO_UPGRADE" = "1" ]; then
@@ -656,7 +731,7 @@ PKGS="curl ca-certificates gnupg jq unzip tar htop ufw chrony net-tools dnsutils
 apt-get install -y -qq $PKGS >/dev/null 2>&1 && ok "базовые пакеты на месте" || warn "часть пакетов не поставилась"
 
 # =============================================================================
-step "3/11  Swap"
+step "3/12  Swap"
 # =============================================================================
 RAM_MB="$(free -m | awk '/^Mem:/{print $2}')"
 SWAP_MB="$(free -m | awk '/^Swap:/{print $2}')"
@@ -672,7 +747,7 @@ else
 fi
 
 # =============================================================================
-step "4/11  Сетевые лимиты и BBR"
+step "4/12  Сетевые лимиты и BBR"
 # =============================================================================
 cat > /etc/sysctl.d/99-remnanode.conf <<'SYSCTL'
 # сеть под VPN-нагрузку
@@ -702,7 +777,7 @@ LIM
 ok "лимиты открытых файлов подняты"
 
 # =============================================================================
-step "5/11  Docker"
+step "5/12  Docker"
 # =============================================================================
 if command -v docker >/dev/null 2>&1; then
   ok "docker уже стоит: $(docker --version | awk '{print $3}' | tr -d ,)"
@@ -732,7 +807,7 @@ else
 fi
 
 # =============================================================================
-step "6/11  Фаервол и fail2ban"
+step "6/12  Фаервол и fail2ban"
 # =============================================================================
 if [ "$DO_UFW" != "1" ]; then
   warn "ufw пропущен по флагу"
@@ -780,7 +855,7 @@ F2B
 fi
 
 # =============================================================================
-step "7/11  Сертификат Let's Encrypt"
+step "7/12  Сертификат Let's Encrypt"
 # =============================================================================
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 if [ "$DO_NGINX" != "1" ]; then
@@ -809,7 +884,7 @@ HOOK
 fi
 
 # =============================================================================
-step "8/11  Сайт-заглушка"
+step "8/12  Сайт-заглушка"
 # =============================================================================
 if [ "$DO_NGINX" != "1" ] || [ "$DO_SITE" != "1" ]; then
   warn "пропущено"
@@ -1009,7 +1084,7 @@ SVG
 fi
 
 # =============================================================================
-step "9/11  nginx"
+step "9/12  nginx"
 # =============================================================================
 if [ "$DO_NGINX" != "1" ]; then
   warn "пропущено: домен не задан"
@@ -1129,7 +1204,7 @@ NGINX
 fi
 
 # =============================================================================
-step "10/11  Нода Remnawave"
+step "10/12  Нода Remnawave"
 # =============================================================================
 cd "$INSTALL_DIR" || die "нет $INSTALL_DIR"
 
@@ -1244,7 +1319,7 @@ COMPOSE
 fi
 
 # =============================================================================
-step "11/11  Проверка"
+step "11/12  Проверка"
 # =============================================================================
 sleep 6
 CT_STATUS="$(docker ps --filter name=remnanode --format '{{.Status}}' 2>/dev/null)"
@@ -1311,6 +1386,11 @@ if [ "$DO_NGINX" = "1" ]; then
   # Сверяем их: чаще всего сайт «не появляется» именно из-за настроек панели
   check_panel_inbound
 fi
+
+# =============================================================================
+step "12/12  Отчёт при входе"
+# =============================================================================
+install_motd
 
 # #############################################################################
 part "ИТОГ"
