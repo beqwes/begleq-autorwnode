@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="3.0"
+VERSION="3.1"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -46,7 +46,10 @@ XHTTP_PATH="${XHTTP_PATH:-/api/v3/media}"
 # либо unix-сокет, либо 127.0.0.1:9443 — поэтому слушаем оба варианта сразу
 FALLBACK_PORT="${FALLBACK_PORT:-9443}"
 WEBROOT="${WEBROOT:-/var/www/html}"
-DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1
+DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; DO_TG=1
+# TrafficGuard: списки сканеров и госсетей. Белый список важнее блок-листа —
+# иначе панель или соседняя нода попадут под раздачу
+TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0
 FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0
 
 # ---------- вывод ----------
@@ -80,6 +83,10 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --force-site         перезаписать уже существующий сайт в /var/www/html
   --no-nginx           не ставить nginx и не выпускать сертификат
   --no-site            не трогать сайт-заглушку
+  --tg-allow <ips>     исключения TrafficGuard: IP панели, других нод, свои
+                       (через запятую; IP панели и текущий SSH добавятся сами)
+  --no-traffic-guard   не ставить TrafficGuard
+  --tg-force           поставить, даже если на ноде уже есть свой traffic-guard
   --no-motd            не ставить отчёт о ноде при входе по SSH
   --motd-only          только поставить отчёт при входе и выйти
   --hostname <name>    переименовать сервер
@@ -113,6 +120,9 @@ while [ $# -gt 0 ]; do
     --force-site)  FORCE_SITE=1; shift;;
     --no-nginx)    DO_NGINX=0; shift;;
     --no-site)     DO_SITE=0; shift;;
+    --tg-allow)    TG_ALLOW="${2:-}"; shift 2;;
+    --no-traffic-guard) DO_TG=0; shift;;
+    --tg-force)    TG_FORCE=1; shift;;
     --no-motd)     DO_MOTD=0; shift;;
     --motd-only)   MOTD_ONLY=1; shift;;
     --hostname)    NEW_HOSTNAME="${2:-}"; shift 2;;
@@ -276,6 +286,15 @@ fi
 [ -S /dev/shm/nginx.sock ]  && printf "%b\n" "  ${G}ok${N}  сокет nginx поднят" \
                             || printf "%b\n" "  ${Y}!!${N}  сокета /dev/shm/nginx.sock нет"
 [ -S /dev/shm/xrxh.socket ] && printf "%b\n" "  ${G}ok${N}  сокет Xray поднят"
+if ipset list TG-BLOCK-V4 >/dev/null 2>&1; then
+  if iptables -C INPUT -j TRAFFIC-GUARD 2>/dev/null; then
+    printf "%b
+" "  ${G}ok${N}  TrafficGuard: $(ipset list TG-BLOCK-V4 | grep -cE '^[0-9]') сетей в блоке, $(ipset list TG-ALLOW-V4 2>/dev/null | grep -cE '^[0-9]') в белом списке"
+  else
+    printf "%b
+" "  ${R}xx${N}  TrafficGuard: цепочка не в INPUT (systemctl start tg-apply)"
+  fi
+fi
 
 for c in remnawave-nginx; do
   st="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)"
@@ -423,6 +442,17 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -aq --filter name=remn
   fi
   if [ -n "${DOMAIN:-}" ]; then
     check_panel_inbound
+  fi
+
+  # TrafficGuard: пусто — не установлен, иначе показываем размеры списков
+  if command -v ipset >/dev/null 2>&1 && ipset list TG-BLOCK-V4 >/dev/null 2>&1; then
+    TGB="$(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]')"
+    TGA="$(ipset list TG-ALLOW-V4 2>/dev/null | grep -cE '^[0-9]')"
+    if iptables -C INPUT -j TRAFFIC-GUARD 2>/dev/null; then
+      ok "TrafficGuard: блок $TGB сетей, в белом списке $TGA (цепочка в INPUT)"
+    else
+      err "TrafficGuard: списки есть ($TGB/$TGA), но цепочки в INPUT нет — systemctl start tg-apply"
+    fi
   fi
 
   # сколько сейчас клиентских соединений
@@ -717,7 +747,7 @@ part "ЧАСТЬ 3: настройка"
 # #############################################################################
 
 # =============================================================================
-step "1/12  Имя, часовой пояс, время"
+step "1/13  Имя, часовой пояс, время"
 # =============================================================================
 if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$(hostname)" ]; then
   if hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null; then
@@ -733,7 +763,7 @@ fi
 timedatectl set-ntp true >/dev/null 2>&1
 
 # =============================================================================
-step "2/12  Пакеты"
+step "2/13  Пакеты"
 # =============================================================================
 apt-get update -qq 2>/dev/null && ok "apt update" || err "apt update не прошёл"
 if [ "$DO_UPGRADE" = "1" ]; then
@@ -745,7 +775,7 @@ PKGS="curl ca-certificates gnupg jq unzip tar htop ufw chrony net-tools dnsutils
 apt-get install -y -qq $PKGS >/dev/null 2>&1 && ok "базовые пакеты на месте" || warn "часть пакетов не поставилась"
 
 # =============================================================================
-step "3/12  Swap"
+step "3/13  Swap"
 # =============================================================================
 RAM_MB="$(free -m | awk '/^Mem:/{print $2}')"
 SWAP_MB="$(free -m | awk '/^Swap:/{print $2}')"
@@ -761,7 +791,7 @@ else
 fi
 
 # =============================================================================
-step "4/12  Сетевые лимиты и BBR"
+step "4/13  Сетевые лимиты и BBR"
 # =============================================================================
 cat > /etc/sysctl.d/99-remnanode.conf <<'SYSCTL'
 # сеть под VPN-нагрузку
@@ -791,7 +821,7 @@ LIM
 ok "лимиты открытых файлов подняты"
 
 # =============================================================================
-step "5/12  Docker"
+step "5/13  Docker"
 # =============================================================================
 if command -v docker >/dev/null 2>&1; then
   ok "docker уже стоит: $(docker --version | awk '{print $3}' | tr -d ,)"
@@ -821,7 +851,7 @@ else
 fi
 
 # =============================================================================
-step "6/12  Фаервол и fail2ban"
+step "6/13  Фаервол и fail2ban"
 # =============================================================================
 if [ "$DO_UFW" != "1" ]; then
   warn "ufw пропущен по флагу"
@@ -869,7 +899,7 @@ F2B
 fi
 
 # =============================================================================
-step "7/12  Сертификат Let's Encrypt"
+step "7/13  Сертификат Let's Encrypt"
 # =============================================================================
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 if [ "$DO_NGINX" != "1" ]; then
@@ -898,7 +928,7 @@ HOOK
 fi
 
 # =============================================================================
-step "8/12  Сайт-заглушка"
+step "8/13  Сайт-заглушка"
 # =============================================================================
 if [ "$DO_NGINX" != "1" ] || [ "$DO_SITE" != "1" ]; then
   warn "пропущено"
@@ -1274,7 +1304,7 @@ HTML
 fi
 
 # =============================================================================
-step "9/12  nginx"
+step "9/13  nginx"
 # =============================================================================
 if [ "$DO_NGINX" != "1" ]; then
   warn "пропущено: домен не задан"
@@ -1421,7 +1451,7 @@ NGINX
 fi
 
 # =============================================================================
-step "10/12  Нода Remnawave"
+step "10/13  Нода Remnawave"
 # =============================================================================
 cd "$INSTALL_DIR" || die "нет $INSTALL_DIR"
 
@@ -1537,7 +1567,7 @@ COMPOSE
 fi
 
 # =============================================================================
-step "11/12  Проверка"
+step "11/13  Проверка"
 # =============================================================================
 sleep 6
 CT_STATUS="$(docker ps --filter name=remnanode --format '{{.Status}}' 2>/dev/null)"
@@ -1631,7 +1661,239 @@ if [ "$DO_NGINX" = "1" ]; then
 fi
 
 # =============================================================================
-step "12/12  Отчёт при входе"
+step "12/13  TrafficGuard"
+# =============================================================================
+if [ "$DO_TG" != "1" ]; then
+  warn "пропущено (--no-traffic-guard)"
+elif [ -x /usr/local/bin/traffic-guard ] && [ "$TG_FORCE" != "1" ]; then
+  warn "на ноде уже стоит свой traffic-guard — не трогаю (--tg-force поставит наш рядом)"
+else
+  apt-get install -y -qq ipset >/dev/null 2>&1
+  if ! command -v ipset >/dev/null 2>&1; then
+    err "ipset не установился — TrafficGuard не поставить"
+  else
+    mkdir -p /etc/traffic-guard/lists /var/lib/traffic-guard
+
+    # --- белый список: панель, текущий SSH-клиент и всё, что дали флагом ---
+    TG_ALLOW_FILE=/etc/traffic-guard/allow.list
+    if [ ! -f "$TG_ALLOW_FILE" ]; then
+      cat > "$TG_ALLOW_FILE" <<'ALLOWHDR'
+# Исключения TrafficGuard: эти адреса никогда не блокируются.
+# Сюда IP панели и других нод. По одному на строку, можно CIDR.
+# Менять удобнее командой:  tg-allow add 1.2.3.4 "панель"
+ALLOWHDR
+    fi
+    SSH_PEER="$(echo "${SSH_CLIENT:-}" | awk '{print $1}')"
+    for a in $PANEL_IP $SSH_PEER $(printf '%s' "$TG_ALLOW" | tr ',;' '  '); do
+      [ -z "$a" ] && continue
+      grep -qxF "$a" "$TG_ALLOW_FILE" 2>/dev/null || echo "$a" >> "$TG_ALLOW_FILE"
+    done
+    ok "в белом списке: $(grep -cvE '^\s*(#|$)' "$TG_ALLOW_FILE") адресов"
+
+    # --- обновление списков и применение правил ---
+    cat > /usr/local/bin/tg-refresh <<'TGREFRESH'
+#!/bin/sh
+# TrafficGuard: качает блок-листы, собирает ipset и вешает цепочку в INPUT.
+# Белый список всегда имеет приоритет над блок-листом.
+#   tg-refresh              полное обновление
+#   tg-refresh --allow-only только перечитать белый список
+#   tg-refresh --hook-only  только пересобрать цепочку и вернуть её в INPUT
+set -u
+DIR=/etc/traffic-guard
+LISTS=$DIR/lists
+ALLOW=$DIR/allow.list
+SAVE=/var/lib/traffic-guard/ipset.save
+SRC="https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/main/public/antiscanner.list
+https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/main/public/government_networks.list"
+MODE="${1:-full}"
+
+mkdir -p "$LISTS" /var/lib/traffic-guard
+[ -f "$ALLOW" ] || : > "$ALLOW"
+
+fill() {   # fill ИМЯ_СЕТА СЕМЕЙСТВО ФАЙЛЫ...
+  set_name="$1"; fam="$2"; shift 2
+  ipset create "$set_name" hash:net family "$fam" -exist
+  ipset create "${set_name}-tmp" hash:net family "$fam" -exist
+  ipset flush "${set_name}-tmp"
+  n=0
+  if [ "$fam" = inet ]; then
+    pat='^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'
+  else
+    pat='^[0-9a-fA-F:]+(/[0-9]{1,3})?$'
+  fi
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    sed 's/#.*//' "$f" | tr -d ' \t\r' | grep -E "$pat" | while IFS= read -r net; do
+      ipset add "${set_name}-tmp" "$net" -exist 2>/dev/null
+    done
+  done
+  n="$(ipset list "${set_name}-tmp" | grep -cE "$pat")"
+  ipset swap "${set_name}-tmp" "$set_name"
+  ipset destroy "${set_name}-tmp"
+  echo "$n"
+}
+
+if [ "$MODE" = "full" ]; then
+  for u in $SRC; do
+    f="$LISTS/$(basename "$u")"
+    if curl -fsSL --max-time 90 "$u" -o "$f.new" && [ -s "$f.new" ]; then
+      mv "$f.new" "$f"
+    else
+      rm -f "$f.new"
+      echo "tg-refresh: не смог скачать $u, оставляю прежний список" >&2
+    fi
+  done
+fi
+
+if [ "$MODE" != "hook-only" ]; then
+  A4="$(fill TG-ALLOW-V4 inet "$ALLOW")"
+  A6="$(fill TG-ALLOW-V6 inet6 "$ALLOW")"
+  B4="$(fill TG-BLOCK-V4 inet "$LISTS"/*.list)"
+  B6="$(fill TG-BLOCK-V6 inet6 "$LISTS"/*.list)"
+  echo "tg-refresh: блок v4=$B4 v6=$B6, разрешено v4=$A4 v6=$A6"
+else
+  for s in TG-ALLOW-V4 TG-BLOCK-V4; do ipset create "$s" hash:net family inet -exist; done
+  for s in TG-ALLOW-V6 TG-BLOCK-V6; do ipset create "$s" hash:net family inet6 -exist; done
+fi
+
+# цепочка: сначала пропускаем своих (RETURN — трафик идёт дальше по правилам
+# ufw, а не проскакивает мимо них), только потом рубим сканеры
+iptables -N TRAFFIC-GUARD 2>/dev/null
+iptables -F TRAFFIC-GUARD
+iptables -A TRAFFIC-GUARD -m set --match-set TG-ALLOW-V4 src -j RETURN
+iptables -A TRAFFIC-GUARD -m set --match-set TG-BLOCK-V4 src -j DROP
+while iptables -D INPUT -j TRAFFIC-GUARD 2>/dev/null; do :; done
+iptables -I INPUT 1 -j TRAFFIC-GUARD
+
+if command -v ip6tables >/dev/null 2>&1; then
+  ip6tables -N TRAFFIC-GUARD 2>/dev/null
+  ip6tables -F TRAFFIC-GUARD
+  ip6tables -A TRAFFIC-GUARD -m set --match-set TG-ALLOW-V6 src -j RETURN
+  ip6tables -A TRAFFIC-GUARD -m set --match-set TG-BLOCK-V6 src -j DROP
+  while ip6tables -D INPUT -j TRAFFIC-GUARD 2>/dev/null; do :; done
+  ip6tables -I INPUT 1 -j TRAFFIC-GUARD
+fi
+
+ipset save > "$SAVE" 2>/dev/null
+exit 0
+TGREFRESH
+    chmod +x /usr/local/bin/tg-refresh
+
+    # --- управление исключениями ---
+    cat > /usr/local/bin/tg-allow <<'TGALLOW'
+#!/bin/sh
+# Исключения TrafficGuard.
+#   tg-allow add 1.2.3.4 [комментарий]   добавить
+#   tg-allow del 1.2.3.4                 убрать
+#   tg-allow list                        показать
+#   tg-allow test 1.2.3.4                проверить, блокируется ли адрес
+set -u
+F=/etc/traffic-guard/allow.list
+[ -f "$F" ] || : > "$F"
+case "${1:-list}" in
+  add)
+    [ -n "${2:-}" ] || { echo "нужен адрес: tg-allow add 1.2.3.4 [комментарий]"; exit 1; }
+    if grep -qxF "$2" "$F"; then
+      echo "$2 уже в списке"
+    else
+      [ -n "${3:-}" ] && echo "# $3" >> "$F"
+      echo "$2" >> "$F"
+      echo "добавлен $2"
+    fi
+    /usr/local/bin/tg-refresh --allow-only
+    ;;
+  del)
+    [ -n "${2:-}" ] || { echo "нужен адрес"; exit 1; }
+    grep -vxF "$2" "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    echo "убран $2"
+    /usr/local/bin/tg-refresh --allow-only
+    ;;
+  test)
+    [ -n "${2:-}" ] || { echo "нужен адрес"; exit 1; }
+    if ipset test TG-ALLOW-V4 "$2" 2>/dev/null; then
+      echo "$2: в белом списке, не блокируется"
+    elif ipset test TG-BLOCK-V4 "$2" 2>/dev/null; then
+      echo "$2: БЛОКИРУЕТСЯ (добавь: tg-allow add $2)"
+    else
+      echo "$2: не в списках, проходит обычные правила"
+    fi
+    ;;
+  *)
+    echo "белый список ($F):"
+    grep -vE '^\s*$' "$F" | sed 's/^/  /'
+    echo
+    echo "в ipset: $(ipset list TG-ALLOW-V4 2>/dev/null | grep -cE '^[0-9]') адресов"
+    echo "в блок-листе: $(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]') сетей"
+    ;;
+esac
+TGALLOW
+    chmod +x /usr/local/bin/tg-allow
+
+    # --- systemd: восстановление после перезагрузки и ежедневное обновление ---
+    cat > /etc/systemd/system/tg-apply.service <<'UNIT'
+[Unit]
+Description=TrafficGuard: восстановить ipset и вернуть цепочку в INPUT
+After=network.target ufw.service docker.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '[ -f /var/lib/traffic-guard/ipset.save ] && ipset restore -exist < /var/lib/traffic-guard/ipset.save || true'
+ExecStart=/usr/local/bin/tg-refresh --hook-only
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    cat > /etc/systemd/system/tg-refresh.service <<'UNIT'
+[Unit]
+Description=TrafficGuard: обновление блок-листов
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tg-refresh
+UNIT
+
+    cat > /etc/systemd/system/tg-refresh.timer <<'UNIT'
+[Unit]
+Description=TrafficGuard: ежедневное обновление блок-листов
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable --now tg-apply.service >/dev/null 2>&1
+    systemctl enable --now tg-refresh.timer >/dev/null 2>&1
+
+    TG_OUT="$(/usr/local/bin/tg-refresh 2>&1 | tail -1)"
+    ok "${TG_OUT:-правила применены}"
+
+    # --- контроль: свои адреса не должны блокироваться ---
+    TG_BAD=""
+    for a in $PANEL_IP $SSH_PEER; do
+      [ -z "$a" ] && continue
+      if ipset test TG-ALLOW-V4 "$a" >/dev/null 2>&1; then
+        ok "$a в белом списке"
+      else
+        TG_BAD="$TG_BAD $a"
+      fi
+    done
+    [ -n "$TG_BAD" ] && err "не попали в белый список:$TG_BAD — добавь через tg-allow add"
+    ok "исключения: tg-allow add <ip> | tg-allow list | tg-allow test <ip>"
+  fi
+fi
+
+# =============================================================================
+step "13/13  Отчёт при входе"
 # =============================================================================
 install_motd
 
