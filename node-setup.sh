@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="2.6"
+VERSION="3.0"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -75,7 +75,8 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --email <mail>       почта для Let's Encrypt (по умолчанию admin@домен)
   --xhttp-path <path>  путь, который nginx отдаёт Xray (по умолчанию /api/v3/media)
   --fallback-port <p>  локальный порт для dest у Reality (по умолчанию 9443, 0 — выключить)
-  --site-theme <t>     тема заглушки: media, files, studio, shop (по умолчанию случайная)
+  --site-theme <t>     стиль заглушки: breakcore, lofi, dnb, synthwave, phonk,
+                       ambient (по умолчанию случайный)
   --force-site         перезаписать уже существующий сайт в /var/www/html
   --no-nginx           не ставить nginx и не выпускать сертификат
   --no-site            не трогать сайт-заглушку
@@ -230,6 +231,19 @@ command -v docker >/dev/null 2>&1 || exit 0
 
 G='\033[32m'; Y='\033[33m'; R='\033[31m'; C='\033[36m'; B='\033[1m'; N='\033[0m'
 TAB="$(printf '\t')"
+
+# чистим экран от вывода логина и печатаем шапку
+clear 2>/dev/null || printf '\033[2J\033[H'
+printf "%b" "${C}${B}"
+cat <<'BANNER'
+███  ████  ███ █    ████  ██       ███  ███   ██  ███
+█  █ █    █    █    █    █  █      █  █ █  █ █  █ █  █
+███  ███  █ ██ █    ███  █  █  ██  ███  ███  █  █ █  █
+█  █ █    █  █ █    █    █ ██      █    █ █  █  █ █  █
+███  ████  ███ ████ ████  ███      █    █  █  ██  ███
+BANNER
+printf "%b\n" "${N}"
+printf "%b\n" "  ${B}$(hostname)${N}  ·  $(date '+%d.%m.%Y %H:%M')  ·  аптайм $(uptime -p 2>/dev/null | sed 's/^up //')"
 
 printf "%b\n" "${B}${C}=== контейнеры ===${N}"
 if [ -z "$(docker ps -aq 2>/dev/null)" ]; then
@@ -670,12 +684,12 @@ if [ "$DO_NGINX" = "1" ]; then
     fi
     # тема заглушки: если не задана — берём случайную
     if [ -z "$SITE_THEME" ]; then
-      SITE_THEME="$(shuf -e media files studio shop -n 1 2>/dev/null || echo media)"
+      SITE_THEME="$(shuf -e breakcore lofi dnb synthwave phonk ambient -n 1 2>/dev/null || echo lofi)"
       ok "тема сайта-заглушки выбрана случайно: $SITE_THEME"
     fi
     case "$SITE_THEME" in
-      media|files|studio|shop) : ;;
-      *) die "неизвестная тема сайта: $SITE_THEME (media|files|studio|shop)";;
+      breakcore|lofi|dnb|synthwave|phonk|ambient|random) : ;;
+      *) die "неизвестная тема: $SITE_THEME (breakcore|lofi|dnb|synthwave|phonk|ambient|random)";;
     esac
   fi
 fi
@@ -897,190 +911,366 @@ else
   [ -d "$WEBROOT" ] && [ -n "$(ls -A "$WEBROOT" 2>/dev/null)" ] && {
     cp -a "$WEBROOT" "${WEBROOT}.bak.$STAMP"; ok "старый сайт → ${WEBROOT}.bak.$STAMP"; }
 
-  # содержимое подбирается под тему, названия и цифры разные при каждом запуске
-  RND_A="$(shuf -i 1000-9999 -n 1 2>/dev/null || echo 4242)"
+  # каждая нода получает свой музыкальный «лейбл»: стиль, палитра, шрифты и
+  # треки берутся случайно, поэтому две ноды не выглядят одинаково
+  # выбранный стиль уважаем, всё остальное считаем «на твой вкус»
   case "$SITE_THEME" in
-    media)
-      SITE_NAME="$(shuf -e Lumen Vireo Aster Nimbus Kestrel -n 1 2>/dev/null || echo Lumen) Stream"
-      TAGLINE="Потоковое видео и трансляции"; NAV2="Библиотека"; NAV2_SLUG="library"
-      F1="Прямые эфиры|Мультибитрейтный HLS, адаптивное качество, задержка до 4 секунд."
-      F2="Библиотека|Более 12 000 часов записей с автоматической расстановкой глав."
-      F3="Аналитика|Онлайн-статистика по зрителям, буферизации и качеству сегментов." ;;
-    files)
-      SITE_NAME="$(shuf -e Dropstone Cratebox Vaultly Parcело Filoak -n 1 2>/dev/null || echo Dropstone)"
-      TAGLINE="Файловое хранилище и обмен"; NAV2="Тарифы"; NAV2_SLUG="pricing"
-      F1="Быстрая отдача|Раздача по 10 Гбит/с, докачка, прямые ссылки без ожидания."
-      F2="Шифрование|AES-256 на стороне хранилища, ссылки с ограниченным сроком жизни."
-      F3="API|Загрузка чанками, вебхуки на завершение, S3-совместимость." ;;
-    studio)
-      SITE_NAME="$(shuf -e Northline Meridian Karbon Oakform Pilotworks -n 1 2>/dev/null || echo Northline) Studio"
-      TAGLINE="Веб-разработка и цифровые продукты"; NAV2="Работы"; NAV2_SLUG="work"
-      F1="Продукты|Проектирование, дизайн-система, фронтенд и бэкенд одной командой."
-      F2="Поддержка|Дежурная смена, мониторинг, восстановление до 30 минут."
-      F3="Интеграции|Платежи, CRM, складской учёт и телеметрия в одном контуре." ;;
-    shop)
-      SITE_NAME="$(shuf -e Vellum Ferra Lintwood Bruna Sadovaya -n 1 2>/dev/null || echo Vellum) Store"
-      TAGLINE="Товары для дома и интерьера"; NAV2="Каталог"; NAV2_SLUG="catalog"
-      F1="Доставка|По городу за день, по стране от двух дней, самовывоз из 14 точек."
-      F2="Возврат|30 дней на возврат без объяснения причин, обмен по размеру бесплатно."
-      F3="Гарантия|Официальная гарантия производителя, сервис в каждом регионе." ;;
+    breakcore|lofi|dnb|synthwave|phonk|ambient) STYLE="$SITE_THEME" ;;
+    *) STYLE="$(shuf -e breakcore lofi dnb synthwave phonk ambient -n 1 2>/dev/null || echo lofi)" ;;
   esac
-  ACCENT="$(shuf -e '#2f6df6' '#0f9d76' '#c2410c' '#7c3aed' '#0891b2' -n 1 2>/dev/null || echo '#2f6df6')"
 
-  mkdir -p "$WEBROOT/assets/js" "$WEBROOT/$NAV2_SLUG" "$WEBROOT/about"
+  case "$STYLE" in
+    breakcore)
+      SITE_NAME="$(shuf -e NOISEFLOOR SPLICEGATE GRIDLOCK TAPEBURN NULLBEAT -n 1)"
+      TAGLINE="breakcore selections"; GENRE="breakcore / jungle"
+      ACC="#e5ff5a"; BG="#0a0a0b"; CARD="#121214"; FG="#e9e9ec"; MUT="#85858e"
+      GFONT="Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700"
+      FAM="'Space Grotesk', system-ui, sans-serif"; MONO="'Space Mono', ui-monospace, monospace"
+      TRACKS="1 hour breakcore mix reupload
+amen sister edit vip
+static bloom 174
+hyperloop cassette rip
+razor tape side b
+kick drum liturgy
+tokyo overdrive dub
+sunset in a washing machine
+final boss amen roll
+mono ghost pressing"
+      ;;
+    lofi)
+      SITE_NAME="$(shuf -e SLOWROOM PAPERTAPE DUSTLINE NIGHTDESK KOTATSU -n 1)"
+      TAGLINE="lo-fi tapes for late hours"; GENRE="lo-fi / chillhop"
+      ACC="#d9a066"; BG="#11100e"; CARD="#191714"; FG="#ece7de"; MUT="#8e877c"
+      GFONT="Inter:wght@400;500;700&family=JetBrains+Mono:wght@400;700"
+      FAM="'Inter', system-ui, sans-serif"; MONO="'JetBrains Mono', ui-monospace, monospace"
+      TRACKS="rain on the balcony
+cassette warmth loop
+4am study session
+tea gone cold
+window seat, slow train
+paper lantern
+old radio dust
+quiet floor two
+morning without alarm
+last bus home"
+      ;;
+    dnb)
+      SITE_NAME="$(shuf -e SUBFRAME ROLLERBOX DEEPWIRE STEPCTRL LOWEND -n 1)"
+      TAGLINE="drum and bass archive"; GENRE="drum and bass / liquid"
+      ACC="#43e0a0"; BG="#080d0c"; CARD="#101917"; FG="#e6f2ee"; MUT="#7d938c"
+      GFONT="Barlow:wght@400;500;700&family=IBM+Plex+Mono:wght@400;700"
+      FAM="'Barlow', system-ui, sans-serif"; MONO="'IBM Plex Mono', ui-monospace, monospace"
+      TRACKS="liquid rollers vol.4
+two step warehouse
+deep bassline sketch
+amen revisited 174
+night drive rollout
+reese in the fog
+half time detour
+copper wire dub
+skyline pressure
+final rollout mix"
+      ;;
+    synthwave)
+      SITE_NAME="$(shuf -e NEONMILE VHS-DRIVE OUTRUNNER LASERGRID MIDNIGHT88 -n 1)"
+      TAGLINE="synthwave and retro drive"; GENRE="synthwave / outrun"
+      ACC="#ff5ea8"; BG="#0b0716"; CARD="#151029"; FG="#ece8ff"; MUT="#8d86ad"
+      GFONT="Orbitron:wght@500;700&family=Space+Mono:wght@400;700"
+      FAM="'Orbitron', system-ui, sans-serif"; MONO="'Space Mono', ui-monospace, monospace"
+      TRACKS="neon mile cruise
+vhs sunset tape
+turbo lane 1986
+chrome and rain
+arcade after midnight
+laser grid horizon
+cassette deck romance
+outrun the storm
+palm street signal
+credits roll"
+      ;;
+    phonk)
+      SITE_NAME="$(shuf -e COWBELL9 DRIFTCULT MEMPHIS404 SLOWDRIFT BLACKTAPE -n 1)"
+      TAGLINE="phonk and drift tapes"; GENRE="phonk / drift"
+      ACC="#ff7a3d"; BG="#0d0a09"; CARD="#171210"; FG="#efe6e0"; MUT="#8f8078"
+      GFONT="Chakra+Petch:wght@500;700&family=Share+Tech+Mono"
+      FAM="'Chakra Petch', system-ui, sans-serif"; MONO="'Share Tech Mono', ui-monospace, monospace"
+      TRACKS="drift corner cowbell
+memphis tape loop
+midnight touge run
+slowed and reversed
+smoke on the overpass
+engine bay hymn
+concrete drift club
+tokyo night pass
+tyre smoke ritual
+last gear pull"
+      ;;
+    ambient)
+      SITE_NAME="$(shuf -e FIELDROOM SLOWGLASS QUIETMASS PALEHOUR DRIFTWOOD -n 1)"
+      TAGLINE="ambient and field recordings"; GENRE="ambient / drone"
+      ACC="#7ab8ff"; BG="#080a0d"; CARD="#101418"; FG="#e4eaf1"; MUT="#7d8894"
+      GFONT="Manrope:wght@400;500;700&family=Roboto+Mono:wght@400;700"
+      FAM="'Manrope', system-ui, sans-serif"; MONO="'Roboto Mono', ui-monospace, monospace"
+      TRACKS="glacier room tone
+pale hour drift
+harbour at four am
+snow static field
+long exposure pad
+slow glass motion
+distant turbine hum
+empty pool reverb
+winter window
+tape hiss lullaby"
+      ;;
+  esac
 
-  cat > "$WEBROOT/assets/style.css" <<CSS
-:root{--bg:#fff;--fg:#14171c;--muted:#5d6673;--line:#e6e9ee;--acc:$ACCENT;--card:#fafbfd}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e8ecf2;--muted:#98a2b3;--line:#232833;--card:#151922}}
+  YEAR="$(date +%Y)"
+  mkdir -p "$WEBROOT/assets" "$WEBROOT/archive" "$WEBROOT/about"
+
+  # ---------- стили ----------
+  cat > "$WEBROOT/assets/style.css" <<'CSS'
+:root{--bg:__BG__;--card:__CARD__;--fg:__FG__;--mut:__MUT__;--acc:__ACC__;--line:#ffffff14}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:1060px;margin:0 auto;padding:0 20px}
-header{border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
-header .wrap{display:flex;align-items:center;gap:24px;height:62px}
-.logo{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:-.02em}
-.logo i{width:22px;height:22px;border-radius:6px;background:var(--acc);display:block}
-nav{margin-left:auto;display:flex;gap:20px}nav a{color:var(--muted);font-size:14px}
-.hero{padding:70px 0 40px}.hero h1{font-size:40px;line-height:1.15;margin:0 0 14px;letter-spacing:-.03em}
-.hero p{color:var(--muted);font-size:18px;max-width:620px;margin:0 0 26px}
-.btn{display:inline-block;padding:11px 20px;border-radius:9px;background:var(--acc);color:#fff;font-weight:600;font-size:15px}
-.btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;padding:26px 0 60px}
-.card{border:1px solid var(--line);border-radius:14px;padding:20px;background:var(--card)}
-.card h3{margin:0 0 8px;font-size:17px}.card p{margin:0;color:var(--muted);font-size:14px}
-.stats{display:flex;gap:34px;flex-wrap:wrap;padding:26px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
-.stats div b{display:block;font-size:26px;letter-spacing:-.02em}.stats div span{color:var(--muted);font-size:13px}
-table{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0 40px}
-th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600}
-footer{border-top:1px solid var(--line);padding:26px 0;color:var(--muted);font-size:13px}
-footer .wrap{display:flex;gap:18px;flex-wrap:wrap}
-h2{font-size:24px;letter-spacing:-.02em;margin:38px 0 10px}
-p.lead{color:var(--muted)}
-@media(max-width:640px){.hero h1{font-size:30px}nav{display:none}}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:__FAM__;line-height:1.6;
+  background-image:radial-gradient(60rem 30rem at 80% -10%, __ACC__14, transparent 60%)}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+header{position:sticky;top:0;z-index:9;background:__BG__e6;backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+header .wrap{display:flex;align-items:center;gap:20px;height:64px}
+.logo{font-weight:700;letter-spacing:.14em;font-size:15px}
+.live{font-family:__MONO__;font-size:11px;color:var(--acc);border:1px solid var(--acc);
+  border-radius:999px;padding:3px 10px;letter-spacing:.12em}
+.live i{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--acc);
+  margin-right:6px;animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+nav{margin-left:auto;display:flex;gap:18px;font-size:13px;color:var(--mut);font-family:__MONO__}
+nav a:hover{color:var(--acc)}
+.hero{padding:64px 0 26px}
+.hero h1{font-size:clamp(38px,7vw,74px);line-height:.98;margin:0 0 12px;letter-spacing:-.03em}
+.hero p{color:var(--mut);margin:0;font-family:__MONO__;font-size:13px;letter-spacing:.1em;text-transform:uppercase}
+.player{margin:26px 0 12px;border:1px solid var(--line);border-radius:16px;background:var(--card);overflow:hidden}
+.player .top{display:flex;gap:18px;padding:18px;align-items:center}
+.cover{width:96px;height:96px;border-radius:10px;flex:none;
+  background:linear-gradient(135deg,__ACC__,#ffffff10);position:relative;overflow:hidden}
+.cover span{position:absolute;inset:auto 8px 8px 8px;font-family:__MONO__;font-size:10px;color:#0009}
+.np{flex:1;min-width:0}
+.np small{font-family:__MONO__;font-size:11px;color:var(--mut);letter-spacing:.14em;text-transform:uppercase}
+.np h3{margin:4px 0 10px;font-size:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar{height:4px;border-radius:2px;background:#ffffff14;overflow:hidden}
+.bar i{display:block;height:100%;width:12%;background:var(--acc)}
+.time{display:flex;justify-content:space-between;font-family:__MONO__;font-size:11px;color:var(--mut);margin-top:6px}
+.eq{display:flex;gap:3px;align-items:flex-end;height:28px}
+.eq b{width:4px;background:var(--acc);border-radius:2px;animation:eq 1.1s infinite ease-in-out}
+.eq b:nth-child(2){animation-delay:.15s}.eq b:nth-child(3){animation-delay:.3s}
+.eq b:nth-child(4){animation-delay:.45s}.eq b:nth-child(5){animation-delay:.6s}
+@keyframes eq{0%,100%{height:7px}50%{height:26px}}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0 44px}
+th{font-family:__MONO__;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);
+  text-align:left;font-weight:400;padding:10px 12px;border-bottom:1px solid var(--line)}
+td{padding:12px;border-bottom:1px solid var(--line)}
+tr[data-t]{cursor:pointer}
+tr[data-t]:hover{background:#ffffff08}
+tr[data-t]:hover td:nth-child(2){color:var(--acc)}
+td.num,td.dur{font-family:__MONO__;color:var(--mut);font-size:12px;width:1%;white-space:nowrap}
+h2{font-size:13px;font-family:__MONO__;letter-spacing:.16em;text-transform:uppercase;color:var(--mut);
+  margin:40px 0 12px;font-weight:400}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px;padding-bottom:40px}
+.rel{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card)}
+.rel .art{aspect-ratio:1;background:linear-gradient(135deg,#ffffff12,__ACC__30)}
+.rel .meta{padding:12px}
+.rel .meta b{display:block;font-size:14px;font-weight:500}
+.rel .meta span{font-family:__MONO__;font-size:11px;color:var(--mut)}
+footer{border-top:1px solid var(--line);padding:26px 0 40px;color:var(--mut);
+  font-family:__MONO__;font-size:11.5px;letter-spacing:.06em}
+footer .wrap{display:flex;gap:20px;flex-wrap:wrap}
+p.lead{color:var(--mut);max-width:60ch}
+@media(max-width:600px){nav{display:none}.player .top{flex-wrap:wrap}}
 CSS
 
-  cat > "$WEBROOT/assets/js/app.js" <<'JS'
+  # ---------- скрипт ----------
+  cat > "$WEBROOT/assets/app.js" <<'JS'
 (function () {
-  var started = Date.now();
-  function tick() {
-    var el = document.querySelector('[data-uptime]');
-    if (el) {
-      var s = Math.floor((Date.now() - started) / 1000);
-      el.textContent = Math.floor(s / 60) + 'м ' + (s % 60) + 'с';
-    }
+  var bar = document.querySelector('.bar i');
+  var cur = document.querySelector('[data-cur]');
+  var tot = document.querySelector('[data-tot]');
+  var np  = document.querySelector('[data-np]');
+  var pos = 12, len = 214;
+
+  function fmt(s) {
+    var m = Math.floor(s / 60), r = Math.floor(s % 60);
+    return m + ':' + (r < 10 ? '0' : '') + r;
   }
-  setInterval(tick, 1000); tick();
-  document.querySelectorAll('[data-toggle]').forEach(function (b) {
-    b.addEventListener('click', function (e) {
-      e.preventDefault();
-      var box = document.querySelector(b.getAttribute('data-toggle'));
-      if (box) box.hidden = !box.hidden;
+  if (tot) tot.textContent = fmt(len);
+  setInterval(function () {
+    pos = (pos + 0.35) % 100;
+    if (bar) bar.style.width = pos.toFixed(1) + '%';
+    if (cur) cur.textContent = fmt(len * pos / 100);
+  }, 300);
+
+  document.querySelectorAll('tr[data-t]').forEach(function (row) {
+    row.addEventListener('click', function () {
+      if (np) np.textContent = row.getAttribute('data-t');
+      pos = 0;
     });
   });
+
   try {
-    var k = 'v_' + new Date().toISOString().slice(0, 10);
+    var k = 'listens_' + new Date().toISOString().slice(0, 10);
     var n = parseInt(localStorage.getItem(k) || '0', 10) + 1;
     localStorage.setItem(k, String(n));
-    var c = document.querySelector('[data-visits]');
-    if (c) c.textContent = String(n);
+    var el = document.querySelector('[data-listens]');
+    if (el) el.textContent = String(n);
   } catch (e) {}
 })();
 JS
 
+  sed -i "s|__BG__|$BG|g; s|__CARD__|$CARD|g; s|__FG__|$FG|g; s|__MUT__|$MUT|g; s|__ACC__|$ACC|g" "$WEBROOT/assets/style.css"
+  sed -i "s|__FAM__|$FAM|g; s|__MONO__|$MONO|g" "$WEBROOT/assets/style.css"
+
   cat > "$WEBROOT/favicon.svg" <<SVG
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="$ACCENT"/><path d="M20 20h24v8H20zm0 16h24v8H20z" fill="#fff"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="$BG"/><rect x="14" y="30" width="6" height="18" rx="3" fill="$ACC"/><rect x="26" y="18" width="6" height="30" rx="3" fill="$ACC"/><rect x="38" y="26" width="6" height="22" rx="3" fill="$ACC"/></svg>
 SVG
 
-  page_head() {
-    printf '%s\n' "<!doctype html>" "<html lang=\"ru\"><head>" \
-      "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" \
-      "<title>$1 — $SITE_NAME</title>" \
-      "<meta name=\"description\" content=\"$TAGLINE\">" \
-      "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">" \
-      "<link rel=\"stylesheet\" href=\"/assets/style.css\">" \
-      "</head><body>" \
-      "<header><div class=\"wrap\">" \
-      "  <a class=\"logo\" href=\"/\"><i></i>$SITE_NAME</a>" \
-      "  <nav><a href=\"/\">Главная</a><a href=\"/$NAV2_SLUG/\">$NAV2</a><a href=\"/about/\">О нас</a></nav>" \
-      "</div></header>"
+  # ---------- общие куски страниц ----------
+  head_html() {
+    cat <<HTML
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>$1 — $SITE_NAME</title>
+<meta name="description" content="$SITE_NAME — $TAGLINE">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=$GFONT&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/style.css">
+</head><body>
+<header><div class="wrap">
+  <a class="logo" href="/">$SITE_NAME</a>
+  <span class="live"><i></i>STREAM ONLINE</span>
+  <nav><a href="/">radio</a><a href="/archive/">archive</a><a href="/about/">about</a></nav>
+</div></header>
+HTML
   }
-  page_foot() {
-    printf '%s\n' "<footer><div class=\"wrap\">" \
-      "  <span>© $(date +%Y) $SITE_NAME</span>" \
-      "  <span>Сессия: <b data-uptime>0м 0с</b></span>" \
-      "  <span>Визитов: <b data-visits>1</b></span>" \
-      "</div></footer>" \
-      "<script src=\"/assets/js/app.js\"></script>" \
-      "</body></html>"
+  foot_html() {
+    cat <<HTML
+<footer><div class="wrap">
+  <span>$SITE_NAME · $GENRE</span>
+  <span>listens today: <b data-listens>1</b></span>
+  <span>since $((YEAR-4))</span>
+</div></footer>
+<script src="/assets/app.js"></script>
+</body></html>
+HTML
   }
-  card() { printf '    <div class="card"><h3>%s</h3><p>%s</p></div>\n' "${1%%|*}" "${1#*|}"; }
 
+  # ---------- главная ----------
+  FIRST="$(printf '%s\n' "$TRACKS" | head -1)"
   {
-    page_head "$TAGLINE"
-    printf '%s\n' "<section class=\"hero\"><div class=\"wrap\">" \
-      "  <h1>$SITE_NAME</h1>" \
-      "  <p>$TAGLINE. Инфраструктура в двух дата-центрах, отдача через распределённую сеть кэширования.</p>" \
-      "  <a class=\"btn\" href=\"/$NAV2_SLUG/\">Раздел «$NAV2»</a>" \
-      "  <a class=\"btn ghost\" href=\"/about/\">Подробнее</a>" \
-      "</div></section>" \
-      "<div class=\"wrap\">" \
-      "  <div class=\"stats\">" \
-      "    <div><b>99.9%</b><span>доступность за 90 дней</span></div>" \
-      "    <div><b>$((RND_A % 40 + 12)) мс</b><span>медианный отклик</span></div>" \
-      "    <div><b>$((RND_A % 9 + 6))</b><span>точек присутствия</span></div>" \
-      "    <div><b>10 Гбит/с</b><span>полоса на узел</span></div>" \
-      "  </div>" \
-      "  <div class=\"grid\">"
-    card "$F1"; card "$F2"; card "$F3"
-    printf '%s\n' "  </div>" "</div>"
-    page_foot
+    head_html "$TAGLINE"
+    cat <<HTML
+<section class="hero"><div class="wrap">
+  <h1>$SITE_NAME</h1>
+  <p>$TAGLINE — 24/7</p>
+  <div class="player">
+    <div class="top">
+      <div class="cover"><span>$GENRE</span></div>
+      <div class="np">
+        <small>now playing</small>
+        <h3 data-np>$FIRST</h3>
+        <div class="bar"><i></i></div>
+        <div class="time"><span data-cur>0:24</span><span data-tot>3:34</span></div>
+      </div>
+      <div class="eq" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b></div>
+    </div>
+  </div>
+</div></section>
+<div class="wrap">
+  <h2>tracklist</h2>
+  <table>
+    <tr><th>#</th><th>title</th><th>plays</th><th>length</th></tr>
+HTML
+    n=0
+    printf '%s\n' "$TRACKS" | while IFS= read -r t; do
+      [ -z "$t" ] && continue
+      n=$((n+1))
+      mm=$(( (RANDOM % 5) + 2 )); ss=$(( RANDOM % 60 ))
+      plays=$(( (RANDOM % 90) + 10 ))
+      printf '    <tr data-t="%s"><td class="num">%02d</td><td>%s</td><td class="dur">%s.%dk</td><td class="dur">%d:%02d</td></tr>\n' \
+        "$t" "$n" "$t" "$plays" "$((RANDOM % 9))" "$mm" "$ss"
+    done
+    cat <<HTML
+  </table>
+  <h2>latest releases</h2>
+  <div class="grid">
+HTML
+    for i in 1 2 3 4; do
+      printf '    <div class="rel"><div class="art"></div><div class="meta"><b>%s vol.%d</b><span>%s · %d tracks</span></div></div>\n' \
+        "$SITE_NAME" "$i" "$((YEAR - i + 1))" "$(( (RANDOM % 8) + 5 ))"
+    done
+    cat <<HTML
+  </div>
+</div>
+HTML
+    foot_html
   } > "$WEBROOT/index.html"
 
+  # ---------- архив ----------
   {
-    page_head "$NAV2"
-    printf '%s\n' "<div class=\"wrap\">" \
-      "  <h2>$NAV2</h2>" \
-      "  <p class=\"lead\">Раздел обновляется автоматически. Ниже последние записи.</p>" \
-      "  <table>" \
-      "    <tr><th>Название</th><th>Обновлено</th><th>Размер</th><th>Статус</th></tr>" \
-      "    <tr><td>Выпуск $(date +%Y)-$(date +%m)</td><td>$(date +%d.%m.%Y)</td><td>1.2 ГБ</td><td>Готово</td></tr>" \
-      "    <tr><td>Выпуск $(date -d '-1 month' +%Y-%m 2>/dev/null || date +%Y-%m)</td><td>$(date -d '-31 days' +%d.%m.%Y 2>/dev/null || date +%d.%m.%Y)</td><td>940 МБ</td><td>Готово</td></tr>" \
-      "    <tr><td>Архив $(($(date +%Y)-1))</td><td>$(($(date +%Y)-1))</td><td>18 ГБ</td><td>В архиве</td></tr>" \
-      "  </table>" \
-      "  <p><a href=\"#\" data-toggle=\"#more\">Показать технические детали</a></p>" \
-      "  <div id=\"more\" hidden class=\"card\"><p>Объекты раздаются через кэширующий слой, ключи инвалидации живут 3600 секунд.</p></div>" \
-      "</div>"
-    page_foot
-  } > "$WEBROOT/$NAV2_SLUG/index.html"
+    head_html "archive"
+    cat <<HTML
+<div class="wrap">
+  <h2>archive</h2>
+  <p class="lead">Everything that aired on the stream, oldest sessions first. Rips are mirrored twice a week.</p>
+  <table>
+    <tr><th>#</th><th>session</th><th>date</th><th>length</th></tr>
+HTML
+    n=0
+    printf '%s\n' "$TRACKS" | while IFS= read -r t; do
+      [ -z "$t" ] && continue
+      n=$((n+1))
+      printf '    <tr><td class="num">%02d</td><td>%s</td><td class="dur">%02d.%02d.%s</td><td class="dur">%d:%02d</td></tr>\n' \
+        "$n" "$t" "$(( (RANDOM % 28) + 1 ))" "$(( (RANDOM % 12) + 1 ))" "$YEAR" "$(( (RANDOM % 5) + 2 ))" "$(( RANDOM % 60 ))"
+    done
+    cat <<HTML
+  </table>
+</div>
+HTML
+    foot_html
+  } > "$WEBROOT/archive/index.html"
 
+  # ---------- about ----------
   {
-    page_head "О нас"
-    printf '%s\n' "<div class=\"wrap\">" \
-      "  <h2>О компании</h2>" \
-      "  <p class=\"lead\">$SITE_NAME работает с $(($(date +%Y)-6)) года. $TAGLINE — основное направление.</p>" \
-      "  <div class=\"grid\">" \
-      "    <div class=\"card\"><h3>Инфраструктура</h3><p>Стойки в двух ЦОД, резервирование питания и каналов, ежедневные снапшоты.</p></div>" \
-      "    <div class=\"card\"><h3>Поддержка</h3><p>Обращения принимаются круглосуточно, первая реакция в течение 15 минут.</p></div>" \
-      "    <div class=\"card\"><h3>Документы</h3><p>Оферта и политика обработки данных доступны по запросу.</p></div>" \
-      "  </div>" \
-      "  <h2>Контакты</h2>" \
-      "  <table><tr><th>Почта</th><td>info@$DOMAIN</td></tr><tr><th>Поддержка</th><td>help@$DOMAIN</td></tr></table>" \
-      "</div>"
-    page_foot
+    head_html "about"
+    cat <<HTML
+<div class="wrap">
+  <h2>about</h2>
+  <p class="lead">$SITE_NAME is a small independent stream focused on $GENRE. No ads, no accounts,
+  no algorithm — just a running playlist and an archive of past sessions.</p>
+  <p class="lead">Submissions are open. Send a link to your mix, we listen to everything and reply
+  when it fits the rotation.</p>
+  <h2>contact</h2>
+  <table>
+    <tr><td>demos</td><td class="dur">demo@$DOMAIN</td></tr>
+    <tr><td>general</td><td class="dur">hi@$DOMAIN</td></tr>
+  </table>
+</div>
+HTML
+    foot_html
   } > "$WEBROOT/about/index.html"
 
-  # путь Xray в robots.txt намеренно не упоминается
   printf 'User-agent: *\nAllow: /\nDisallow: /admin/\nSitemap: https://%s/sitemap.xml\n' "$DOMAIN" > "$WEBROOT/robots.txt"
   {
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-    printf '  <url><loc>https://%s/</loc><priority>1.0</priority></url>\n' "$DOMAIN"
-    printf '  <url><loc>https://%s/%s/</loc><priority>0.8</priority></url>\n' "$DOMAIN" "$NAV2_SLUG"
-    printf '  <url><loc>https://%s/about/</loc><priority>0.5</priority></url>\n' "$DOMAIN"
+    for u in "/" "/archive/" "/about/"; do
+      printf '  <url><loc>https://%s%s</loc></url>\n' "$DOMAIN" "$u"
+    done
     printf '%s\n' '</urlset>'
   } > "$WEBROOT/sitemap.xml"
 
   chown -R root:root "$WEBROOT" 2>/dev/null; chmod -R a+rX "$WEBROOT" 2>/dev/null
-  ok "сайт «$SITE_NAME» ($SITE_THEME) собран: главная, /$NAV2_SLUG/, /about/, robots, sitemap"
+  SITE_THEME="$STYLE"
+  ok "сайт «$SITE_NAME» ($STYLE) собран: радио, /archive/, /about/, robots, sitemap"
 fi
 
 # =============================================================================
@@ -1152,6 +1342,33 @@ server {
     return 444;
 }
 NGINX
+
+  # порт 80: без него сайт-заглушка выглядит неживой — настоящий сайт на :80
+  # отвечает редиректом, а не обрывом связи. Заодно отдаём ACME-челлендж,
+  # чтобы сертификат продлевался без остановки nginx
+  BUSY80="$(ss -tlnpH 2>/dev/null | awk '$4 ~ /:80$/ {print $0}' | grep -v nginx | head -1)"
+  if [ -n "$BUSY80" ]; then
+    warn "порт 80 занят другим процессом — блок редиректа не добавляю"
+  else
+    mkdir -p /var/www/certbot
+    cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
+
+server {
+    listen 0.0.0.0:80 default_server;
+    server_name $DOMAIN _;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+NGINX
+    ok "на :80 повешен редирект в https и путь для продления сертификата"
+  fi
 
   # второй вход для панелей, где у Reality dest = 127.0.0.1:<порт>, а не сокет.
   # Наружу порт не открывается — только петля, снаружи его не видно
@@ -1283,6 +1500,7 @@ COMPOSE
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - $WEBROOT:$WEBROOT:ro
+      - /var/www/certbot:/var/www/certbot:ro
       - /dev/shm:/dev/shm:rw
     command: sh -c 'rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
 COMPOSE
@@ -1378,6 +1596,31 @@ if [ "$DO_NGINX" = "1" ]; then
   fi
 
   [ -f "$WEBROOT/index.html" ] && ok "сайт-заглушка на месте: $WEBROOT/index.html" || warn "сайта в $WEBROOT нет"
+
+  # раз nginx занял :80, продлевать standalone-способом уже нельзя — переводим
+  # renew на webroot, теперь сертификат обновляется без остановки контейнера
+  RCONF="/etc/letsencrypt/renewal/$DOMAIN.conf"
+  if [ -f "$CERT_DIR/fullchain.pem" ] && [ -d /var/www/certbot ] && [ "$NG_STATE" = "running" ] && [ -f "$RCONF" ]; then
+    # certbot с --keep-until-expiring просто ничего не делает и способ продления
+    # не меняет, поэтому переключаем authenticator прямо в конфиге продления
+    if grep -q '^authenticator = standalone' "$RCONF"; then
+      cp -a "$RCONF" "$RCONF.bak.$STAMP"
+      sed -i 's|^authenticator = standalone|authenticator = webroot|' "$RCONF"
+      grep -q '^webroot_path' "$RCONF" || sed -i '/^authenticator = webroot/a webroot_path = /var/www/certbot,' "$RCONF"
+      grep -q '^\[\[webroot_map\]\]' "$RCONF" || printf '
+[[webroot_map]]
+%s = /var/www/certbot
+' "$DOMAIN" >> "$RCONF"
+      if certbot renew --dry-run --cert-name "$DOMAIN" >/dev/null 2>&1; then
+        ok "продление переведено на webroot и проверено сухим прогоном"
+      else
+        err "после перевода на webroot сухой прогон продления не прошёл"
+        say "      проверь вручную: certbot renew --dry-run --cert-name $DOMAIN"
+      fi
+    else
+      ok "продление уже настроено без standalone"
+    fi
+  fi
 
   CERT_TILL="$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
   [ -n "$CERT_TILL" ] && ok "сертификат $DOMAIN годен до $CERT_TILL"
