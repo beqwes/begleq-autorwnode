@@ -87,6 +87,36 @@ tg-allow list                    # показать белый список
 Отключается флагом `--no-traffic-guard`. Если на ноде уже стоит свой
 `traffic-guard`, скрипт его не трогает.
 
+## WARP
+
+Скрипт поднимает Cloudflare WARP отдельным интерфейсом `warp` (wgcf + wg-quick)
+и **не трогает маршрут по умолчанию** — `Table = off`, иначе в туннель ушёл бы
+весь трафик ноды вместе со связью с панелью. Строка `DNS =` из профиля
+убирается: под неё нужен `resolvconf`, а системный резолвер менять незачем.
+
+Готовый outbound скрипт печатает в конце и кладёт в
+`/opt/remnanode/warp-outbound.json` — его вставляют в конфиг ноды в панели:
+
+```json
+{
+  "tag": "warp",
+  "protocol": "freedom",
+  "settings": { "domainStrategy": "UseIP" },
+  "streamSettings": { "sockopt": { "interface": "warp", "tcpFastOpen": true } }
+}
+```
+
+Дальше в `routing` добавляется правило, что гнать через него, например
+`{ "type": "field", "domain": ["geosite:openai"], "outboundTag": "warp" }`.
+
+Поставить WARP на уже настроенную ноду, ничего больше не трогая:
+
+```bash
+bash node-setup.sh --warp-only
+```
+
+Отключается флагом `--no-warp`.
+
 ## Требования
 
 Debian или Ubuntu, root. Остальное скрипт доставит сам.

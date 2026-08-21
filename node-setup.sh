@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="4.0"
+VERSION="4.1"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -46,11 +46,11 @@ XHTTP_PATH="${XHTTP_PATH:-/api/v3/media}"
 # либо unix-сокет, либо 127.0.0.1:9443 — поэтому слушаем оба варианта сразу
 FALLBACK_PORT="${FALLBACK_PORT:-9443}"
 WEBROOT="${WEBROOT:-/var/www/html}"
-DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; DO_TG=1
+DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; DO_TG=1; DO_WARP=1
 # TrafficGuard: списки сканеров и госсетей. Белый список важнее блок-листа —
 # иначе панель или соседняя нода попадут под раздачу
-TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0
-FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0
+TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
+FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0
 
 # ---------- вывод ----------
 if [ -t 1 ]; then C0=$'\e[0m'; CB=$'\e[1m'; CG=$'\e[32m'; CY=$'\e[33m'; CR=$'\e[31m'; CC=$'\e[36m'; CM=$'\e[35m'
@@ -87,6 +87,9 @@ node-setup.sh — отчёт о ноде и её первоначальная н
                        (через запятую; IP панели и текущий SSH добавятся сами)
   --no-traffic-guard   не ставить TrafficGuard
   --tg-force           поставить, даже если на ноде уже есть свой traffic-guard
+  --no-warp            не ставить WARP
+  --warp-force         переставить WARP, даже если интерфейс уже есть
+  --warp-only          только поставить WARP и выйти
   --no-motd            не ставить отчёт о ноде при входе по SSH
   --motd-only          только поставить отчёт при входе и выйти
   --hostname <name>    переименовать сервер
@@ -123,6 +126,9 @@ while [ $# -gt 0 ]; do
     --tg-allow)    TG_ALLOW="${2:-}"; shift 2;;
     --no-traffic-guard) DO_TG=0; shift;;
     --tg-force)    TG_FORCE=1; shift;;
+    --no-warp)     DO_WARP=0; shift;;
+    --warp-force)  WARP_FORCE=1; shift;;
+    --warp-only)   WARP_ONLY=1; shift;;
     --no-motd)     DO_MOTD=0; shift;;
     --motd-only)   MOTD_ONLY=1; shift;;
     --hostname)    NEW_HOSTNAME="${2:-}"; shift 2;;
@@ -225,6 +231,122 @@ check_panel_inbound() {
     say "      либо dest = 127.0.0.1:$FALLBACK_PORT, либо перезапустить скрипт с"
     say "      --fallback-port <порт из dest>"
   fi
+}
+
+# ставит WARP отдельным интерфейсом: маршрут по умолчанию не трогаем,
+# Xray сам привязывает к нему нужные соединения через sockopt.interface
+install_warp() {
+WARP_OUT="$INSTALL_DIR/warp-outbound.json"
+if [ "$DO_WARP" != "1" ]; then
+  warn "пропущено (--no-warp)"
+elif ip link show warp >/dev/null 2>&1 && [ "$WARP_FORCE" != "1" ]; then
+  ok "интерфейс warp уже поднят — не трогаю (--warp-force чтобы переставить)"
+else
+  apt-get install -y -qq wireguard-tools >/dev/null 2>&1
+  if ! command -v wg-quick >/dev/null 2>&1; then
+    err "wireguard-tools не поставились — WARP не поднять"
+  else
+    # wgcf регистрирует бесплатный аккаунт WARP и отдаёт готовый профиль
+    if ! command -v wgcf >/dev/null 2>&1; then
+      case "$(uname -m)" in
+        x86_64|amd64) WARCH=amd64 ;;
+        aarch64|arm64) WARCH=arm64 ;;
+        *) WARCH=amd64 ;;
+      esac
+      WURL="$(curl -fsSL --max-time 30 https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null \
+              | grep -oE '"browser_download_url": *"[^"]*linux_'"$WARCH"'"' | cut -d'"' -f4 | head -1)"
+      if [ -n "$WURL" ] && curl -fsSL --max-time 60 "$WURL" -o /usr/local/bin/wgcf; then
+        chmod +x /usr/local/bin/wgcf
+        ok "wgcf $(basename "$WURL" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) установлен"
+      else
+        err "не смог скачать wgcf с github"
+      fi
+    fi
+
+    if command -v wgcf >/dev/null 2>&1; then
+      mkdir -p /etc/wireguard
+      cd /etc/wireguard || die "нет /etc/wireguard"
+      [ -f wgcf-account.toml ] || wgcf register --accept-tos >/dev/null 2>&1
+      if [ ! -f wgcf-account.toml ]; then
+        err "wgcf не зарегистрировал аккаунт WARP"
+      else
+        wgcf generate --profile /etc/wireguard/warp.conf >/dev/null 2>&1
+        if [ ! -s /etc/wireguard/warp.conf ]; then
+          err "wgcf не сгенерировал профиль"
+        else
+          # Table = off принципиально: иначе wg-quick уводит в WARP весь трафик
+          # ноды, включая связь с панелью. Нам нужен только сам интерфейс,
+          # Xray сам привяжет к нему нужные соединения
+          # строку DNS= убираем: wg-quick требует под неё resolvconf, которого
+          # в Debian нет, а системный резолвер нам менять и незачем
+          sed -i '/^DNS *=/d' /etc/wireguard/warp.conf
+          grep -q '^Table' /etc/wireguard/warp.conf || \
+            sed -i '/^\[Interface\]/a Table = off' /etc/wireguard/warp.conf
+          grep -q '^MTU' /etc/wireguard/warp.conf || \
+            sed -i '/^\[Interface\]/a MTU = 1280' /etc/wireguard/warp.conf
+          chmod 600 /etc/wireguard/warp.conf
+
+          systemctl enable wg-quick@warp >/dev/null 2>&1
+          if ! systemctl restart wg-quick@warp >/dev/null 2>&1; then
+            # на нодах без IPv6 профиль с v6-адресом не поднимается — срезаем
+            sed -i 's/, *[0-9a-fA-F:]*:[0-9a-fA-F:]*\/128//; s/, *::\/0//' /etc/wireguard/warp.conf
+            systemctl restart wg-quick@warp >/dev/null 2>&1 && warn "WARP поднят без IPv6"
+          fi
+
+          if ip link show warp >/dev/null 2>&1; then
+            ok "интерфейс warp поднят"
+            WTRACE="$(curl -s --interface warp --max-time 15 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)"
+            WSTATE="$(printf '%s' "$WTRACE" | grep -E '^warp=' | cut -d= -f2)"
+            WIP="$(printf '%s' "$WTRACE" | grep -E '^ip=' | cut -d= -f2)"
+            case "$WSTATE" in
+              on|plus) ok "трафик через WARP работает: warp=$WSTATE, внешний IP $WIP" ;;
+              *) err "интерфейс есть, но трафик через него не идёт (warp=${WSTATE:-нет ответа})" ;;
+            esac
+            # проверяем, что маршрут по умолчанию остался прежним
+            DEFDEV="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+            if [ "$DEFDEV" = "warp" ]; then
+              err "маршрут по умолчанию ушёл в warp — панель потеряет ноду, чиню"
+              sed -i '/^Table/d' /etc/wireguard/warp.conf
+              sed -i '/^\[Interface\]/a Table = off' /etc/wireguard/warp.conf
+              systemctl restart wg-quick@warp >/dev/null 2>&1
+            else
+              ok "маршрут по умолчанию не тронут (идёт через $DEFDEV)"
+            fi
+          else
+            err "интерфейс warp не поднялся: $(systemctl status wg-quick@warp --no-pager 2>&1 | tail -2 | tr '\n' ' ')"
+          fi
+        fi
+      fi
+    fi
+  fi
+fi
+
+# готовый кусок для панели — его человек вставляет в outbounds сам
+cat > "$WARP_OUT" <<'WJSON'
+{
+  "tag": "warp",
+  "protocol": "freedom",
+  "settings": {
+    "domainStrategy": "UseIP"
+  },
+  "streamSettings": {
+    "sockopt": {
+      "interface": "warp",
+      "tcpFastOpen": true
+    }
+  }
+}
+WJSON
+if ip link show warp >/dev/null 2>&1; then
+  say ""
+  say "  ${CB}Вставь в панели в outbounds конфига этой ноды:${C0}"
+  sed 's/^/    /' "$WARP_OUT"
+  say ""
+  say "  и правило маршрутизации, что гнать через WARP, например:"
+  say '    { "type": "field", "domain": ["geosite:openai"], "outboundTag": "warp" }'
+  say ""
+  say "  файл лежит здесь: $WARP_OUT"
+fi
 }
 
 # ставит баннер о состоянии ноды, который показывается при входе по SSH
@@ -330,6 +452,18 @@ fi
 }
 
 say "${CB}node-setup v$VERSION${C0} — $(hostname), $(date '+%d.%m.%Y %H:%M %Z')"
+
+if [ "$WARP_ONLY" = "1" ]; then
+  install_warp
+  say ""
+  if [ -n "$FAILED" ]; then
+    bad "проблемы:$FAILED"
+    say "РЕЗУЛЬТАТ: с ошибками"
+    exit 1
+  fi
+  say "РЕЗУЛЬТАТ: ok"
+  exit 0
+fi
 
 if [ "$MOTD_ONLY" = "1" ]; then
   install_motd
@@ -763,7 +897,7 @@ part "ЧАСТЬ 3: настройка"
 # #############################################################################
 
 # =============================================================================
-step "1/13  Имя, часовой пояс, время"
+step "1/14  Имя, часовой пояс, время"
 # =============================================================================
 if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$(hostname)" ]; then
   if hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null; then
@@ -779,7 +913,7 @@ fi
 timedatectl set-ntp true >/dev/null 2>&1
 
 # =============================================================================
-step "2/13  Пакеты"
+step "2/14  Пакеты"
 # =============================================================================
 apt-get update -qq 2>/dev/null && ok "apt update" || err "apt update не прошёл"
 if [ "$DO_UPGRADE" = "1" ]; then
@@ -791,7 +925,7 @@ PKGS="curl ca-certificates gnupg jq unzip tar htop ufw chrony net-tools dnsutils
 apt-get install -y -qq $PKGS >/dev/null 2>&1 && ok "базовые пакеты на месте" || warn "часть пакетов не поставилась"
 
 # =============================================================================
-step "3/13  Swap"
+step "3/14  Swap"
 # =============================================================================
 RAM_MB="$(free -m | awk '/^Mem:/{print $2}')"
 SWAP_MB="$(free -m | awk '/^Swap:/{print $2}')"
@@ -807,7 +941,7 @@ else
 fi
 
 # =============================================================================
-step "4/13  Сетевые лимиты и BBR"
+step "4/14  Сетевые лимиты и BBR"
 # =============================================================================
 cat > /etc/sysctl.d/99-remnanode.conf <<'SYSCTL'
 # сеть под VPN-нагрузку
@@ -837,7 +971,7 @@ LIM
 ok "лимиты открытых файлов подняты"
 
 # =============================================================================
-step "5/13  Docker"
+step "5/14  Docker"
 # =============================================================================
 if command -v docker >/dev/null 2>&1; then
   ok "docker уже стоит: $(docker --version | awk '{print $3}' | tr -d ,)"
@@ -867,7 +1001,7 @@ else
 fi
 
 # =============================================================================
-step "6/13  Фаервол и fail2ban"
+step "6/14  Фаервол и fail2ban"
 # =============================================================================
 if [ "$DO_UFW" != "1" ]; then
   warn "ufw пропущен по флагу"
@@ -915,7 +1049,7 @@ F2B
 fi
 
 # =============================================================================
-step "7/13  Сертификат Let's Encrypt"
+step "7/14  Сертификат Let's Encrypt"
 # =============================================================================
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 if [ "$DO_NGINX" != "1" ]; then
@@ -944,7 +1078,7 @@ HOOK
 fi
 
 # =============================================================================
-step "8/13  Сайт-заглушка"
+step "8/14  Сайт-заглушка"
 # =============================================================================
 if [ "$DO_NGINX" != "1" ] || [ "$DO_SITE" != "1" ]; then
   warn "пропущено"
@@ -2250,7 +2384,7 @@ SVG
 fi
 
 # =============================================================================
-step "9/13  nginx"
+step "9/14  nginx"
 # =============================================================================
 if [ "$DO_NGINX" != "1" ]; then
   warn "пропущено: домен не задан"
@@ -2397,7 +2531,7 @@ NGINX
 fi
 
 # =============================================================================
-step "10/13  Нода Remnawave"
+step "10/14  Нода Remnawave"
 # =============================================================================
 cd "$INSTALL_DIR" || die "нет $INSTALL_DIR"
 
@@ -2513,7 +2647,7 @@ COMPOSE
 fi
 
 # =============================================================================
-step "11/13  Проверка"
+step "11/14  Проверка"
 # =============================================================================
 sleep 6
 CT_STATUS="$(docker ps --filter name=remnanode --format '{{.Status}}' 2>/dev/null)"
@@ -2607,7 +2741,7 @@ if [ "$DO_NGINX" = "1" ]; then
 fi
 
 # =============================================================================
-step "12/13  TrafficGuard"
+step "12/14  TrafficGuard"
 # =============================================================================
 if [ "$DO_TG" != "1" ]; then
   warn "пропущено (--no-traffic-guard)"
@@ -2839,7 +2973,12 @@ UNIT
 fi
 
 # =============================================================================
-step "13/13  Отчёт при входе"
+step "13/14  WARP"
+# =============================================================================
+install_warp
+
+# =============================================================================
+step "14/14  Отчёт при входе"
 # =============================================================================
 install_motd
 
@@ -2866,6 +3005,11 @@ say "  SECRET_KEY  : ${SECRET_KEY:0:10}… (${#SECRET_KEY} симв.)"
 say "  Контейнер   : ${CT_STATUS:-не запущен}"
 say "  UFW         : $(ufw status 2>/dev/null | head -1)"
 say "  Swap        : $(free -m | awk '/^Swap:/{print $2}') МБ"
+if ip link show warp >/dev/null 2>&1; then
+  say "  WARP        : поднят, outbound для панели в $INSTALL_DIR/warp-outbound.json"
+else
+  say "  WARP        : не поднят"
+fi
 say ""
 if [ -n "$FAILED" ]; then
   bad "проблемы:$FAILED"
