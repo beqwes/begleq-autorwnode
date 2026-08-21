@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="4.1"
+VERSION="4.2"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -46,11 +46,11 @@ XHTTP_PATH="${XHTTP_PATH:-/api/v3/media}"
 # либо unix-сокет, либо 127.0.0.1:9443 — поэтому слушаем оба варианта сразу
 FALLBACK_PORT="${FALLBACK_PORT:-9443}"
 WEBROOT="${WEBROOT:-/var/www/html}"
-DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; DO_TG=1; DO_WARP=1
+DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; DO_TG=1; DO_WARP=1; DO_BBR=1
 # TrafficGuard: списки сканеров и госсетей. Белый список важнее блок-листа —
 # иначе панель или соседняя нода попадут под раздачу
 TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
-FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0
+FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
 
 # ---------- вывод ----------
 if [ -t 1 ]; then C0=$'\e[0m'; CB=$'\e[1m'; CG=$'\e[32m'; CY=$'\e[33m'; CR=$'\e[31m'; CC=$'\e[36m'; CM=$'\e[35m'
@@ -90,6 +90,11 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --no-warp            не ставить WARP
   --warp-force         переставить WARP, даже если интерфейс уже есть
   --warp-only          только поставить WARP и выйти
+  --warp-off           выключить WARP (профиль остаётся) и выйти
+  --warp-purge         снести WARP полностью и выйти
+  --menu               открыть меню настроек (то же, что команда begleq)
+  --bbr-only           только включить BBR и сетевые лимиты, затем выйти
+  --no-bbr             не трогать sysctl и BBR
   --no-motd            не ставить отчёт о ноде при входе по SSH
   --motd-only          только поставить отчёт при входе и выйти
   --hostname <name>    переименовать сервер
@@ -129,6 +134,11 @@ while [ $# -gt 0 ]; do
     --no-warp)     DO_WARP=0; shift;;
     --warp-force)  WARP_FORCE=1; shift;;
     --warp-only)   WARP_ONLY=1; shift;;
+    --warp-off)    WARP_OFF=1; shift;;
+    --warp-purge)  WARP_PURGE=1; shift;;
+    --menu)        MENU=1; shift;;
+    --bbr-only)    BBR_ONLY=1; shift;;
+    --no-bbr)      DO_BBR=0; shift;;
     --no-motd)     DO_MOTD=0; shift;;
     --motd-only)   MOTD_ONLY=1; shift;;
     --hostname)    NEW_HOSTNAME="${2:-}"; shift 2;;
@@ -232,6 +242,169 @@ check_panel_inbound() {
     say "      --fallback-port <порт из dest>"
   fi
 }
+
+# меню настроек. Открывается командой begleq из любого места
+menu_main() {
+  [ -n "$TTY_IN" ] || die "меню нужен терминал — запусти из консоли сервера"
+  SELF="$INSTALL_DIR/node-setup.sh"
+  [ -f "$SELF" ] || SELF="$0"
+  while :; do
+    clear 2>/dev/null || printf '\033[2J\033[H'
+    printf '%b\n' "${CB}${CC}begleq${C0} · $(hostname) · $(date '+%d.%m.%Y %H:%M')"
+    say ""
+    # короткая сводка, чтобы было видно, что вообще происходит
+    NODE_ST="$(docker inspect -f '{{.State.Status}}' remnanode 2>/dev/null)"
+    NGX_ST="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
+    CC_ST="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+    ip link show warp >/dev/null 2>&1 && W_ST="поднят" || W_ST="выключен"
+    ipset list TG-BLOCK-V4 >/dev/null 2>&1 && TG_ST="$(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]') сетей" || TG_ST="не стоит"
+    printf '  нода: %-12s nginx: %-12s BBR: %-6s WARP: %-9s TrafficGuard: %s\n' \
+      "${NODE_ST:-нет}" "${NGX_ST:-нет}" "${CC_ST:-?}" "$W_ST" "$TG_ST"
+    say ""
+    say "  1) состояние ноды подробно"
+    say "  2) настроить или обновить ноду"
+    say "  3) WARP: включить"
+    say "  4) WARP: выключить"
+    say "  5) WARP: снести полностью"
+    say "  6) BBR и сетевые лимиты: включить"
+    say "  7) TrafficGuard: исключения"
+    say "  8) заглушка: пересобрать"
+    say "  9) показать outbound для панели"
+    say " 10) обновить сам скрипт с гитхаба"
+    say "  0) выход"
+    say ""
+    printf '%b' "${CC}?${C0} выбор: "
+    IFS= read -r choice < "$TTY_IN" || break
+    say ""
+    case "$choice" in
+      1)  bash "$SELF" --status-only ;;
+      2)  bash "$SELF" ;;
+      3)  bash "$SELF" --warp-only ;;
+      4)  bash "$SELF" --warp-off ;;
+      5)  printf '%b' "${CY}снести WARP полностью? [y/N]: ${C0}"
+          IFS= read -r yn < "$TTY_IN"
+          case "$yn" in [yYдД]*) bash "$SELF" --warp-purge ;; *) warn "отменено" ;; esac ;;
+      6)  bash "$SELF" --bbr-only ;;
+      7)  if command -v tg-allow >/dev/null 2>&1; then
+            tg-allow list
+            say ""
+            printf '%b' "${CC}?${C0} добавить IP в белый список (Enter — пропустить): "
+            IFS= read -r ip < "$TTY_IN"
+            [ -n "$ip" ] && tg-allow add "$ip"
+          else
+            warn "TrafficGuard не установлен — поставится при пункте 2"
+          fi ;;
+      8)  D="$(grep -m1 -E '^[[:space:]]*server_name[[:space:]]+[A-Za-z0-9.-]+;' "$INSTALL_DIR/nginx.conf" 2>/dev/null \
+               | sed -E 's/.*server_name[[:space:]]+//; s/;.*//')"
+          if [ -z "$D" ]; then
+            warn "домен не найден — сначала настрой ноду (пункт 2)"
+          else
+            say "  доступные стили:"
+            printf '%s\n' "$ALL_PRESETS_HINT" | fold -s -w 76 | sed 's/^/    /'
+            printf '%b' "${CC}?${C0} стиль (Enter — случайный): "
+            IFS= read -r st < "$TTY_IN"
+            bash "$SELF" --no-status --no-upgrade --no-swap --no-traffic-guard --no-motd --no-warp \
+                 --domain "$D" --force-site ${st:+--site-theme "$st"} --yes
+          fi ;;
+      9)  if [ -f "$INSTALL_DIR/warp-outbound.json" ]; then
+            say "  вставь это в outbounds конфига ноды в панели:"
+            sed 's/^/    /' "$INSTALL_DIR/warp-outbound.json"
+          else
+            warn "файла нет — сначала подними WARP (пункт 3)"
+          fi ;;
+      10) if curl -fsSL --max-time 60 https://raw.githubusercontent.com/beqwes/begleq-autorwnode/main/node-setup.sh -o "$SELF.new"; then
+            if bash -n "$SELF.new" 2>/dev/null; then
+              mv "$SELF.new" "$SELF"; ok "скрипт обновлён"
+            else
+              rm -f "$SELF.new"; err "скачанный скрипт не прошёл проверку синтаксиса"
+            fi
+          else
+            err "не смог скачать с гитхаба"
+          fi ;;
+      0|q|"") say "пока"; return 0 ;;
+      *)  warn "нет такого пункта" ;;
+    esac
+    say ""
+    printf '%b' "${CC}Enter${C0} — назад в меню "
+    IFS= read -r _ < "$TTY_IN"
+  done
+}
+
+# ставит команду begleq, чтобы меню открывалось откуда угодно
+install_cli() {
+  cat > /usr/local/bin/begleq <<CLI
+#!/bin/sh
+# Меню настройки ноды. Поставлено node-setup.sh
+exec bash $INSTALL_DIR/node-setup.sh --menu "\$@"
+CLI
+  chmod +x /usr/local/bin/begleq
+  # сам скрипт должен лежать там, откуда его зовёт команда
+  if [ -f "$0" ] && [ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "$INSTALL_DIR/node-setup.sh" 2>/dev/null)" ]; then
+    cp -f "$0" "$INSTALL_DIR/node-setup.sh" 2>/dev/null
+  fi
+  ok "команда begleq поставлена — открывает меню настроек"
+}
+
+# BBR + fq и сетевые лимиты. Вынесено отдельно, чтобы можно было
+# применить одним флагом на уже настроенной ноде
+enable_bbr() {
+cat > /etc/sysctl.d/99-remnanode.conf <<'SYSCTL'
+# сеть под VPN-нагрузку
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.ip_forward = 1
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.somaxconn = 8192
+fs.file-max = 1048576
+SYSCTL
+sysctl --system >/dev/null 2>&1
+CC_ALGO="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+[ "$CC_ALGO" = "bbr" ] && ok "sysctl применён, congestion control: bbr" || warn "sysctl применён, congestion control: ${CC_ALGO:-?}"
+
+grep -q '^\* soft nofile' /etc/security/limits.conf 2>/dev/null || cat >> /etc/security/limits.conf <<'LIM'
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+LIM
+ok "лимиты открытых файлов подняты"
+}
+
+# выключает WARP, профиль остаётся — включить обратно можно --warp-only
+disable_warp() {
+  if ! ip link show warp >/dev/null 2>&1 && [ ! -f /etc/wireguard/warp.conf ]; then
+    warn "WARP на ноде и не стоял"
+    return 0
+  fi
+  systemctl disable --now wg-quick@warp >/dev/null 2>&1
+  ip link delete warp >/dev/null 2>&1
+  if ip link show warp >/dev/null 2>&1; then
+    err "интерфейс warp всё ещё поднят"
+  else
+    ok "WARP выключен, автозапуск снят (профиль на месте)"
+    say "      включить обратно: bash $0 --warp-only"
+    say "      не забудь убрать outbound warp из конфига ноды в панели,"
+    say "      иначе Xray будет слать трафик в несуществующий интерфейс"
+  fi
+}
+
+# сносит WARP полностью: юнит, профиль, аккаунт wgcf
+purge_warp() {
+  systemctl disable --now wg-quick@warp >/dev/null 2>&1
+  ip link delete warp >/dev/null 2>&1
+  rm -f /etc/wireguard/warp.conf /etc/wireguard/warp.conf.disabled
+  rm -f /etc/wireguard/wgcf-account.toml /etc/wireguard/wgcf-profile.conf
+  rm -f /usr/local/bin/wgcf "$INSTALL_DIR/warp-outbound.json"
+  ok "WARP снесён полностью: интерфейс, профиль, аккаунт wgcf и файл outbound"
+  say "      убери outbound warp из конфига ноды в панели"
+}
+
 
 # ставит WARP отдельным интерфейсом: маршрут по умолчанию не трогаем,
 # Xray сам привязывает к нему нужные соединения через sockopt.interface
@@ -433,7 +606,7 @@ done
 
 printf "\n%b\n" "${B}${C}=== логи ноды, последние 25 строк ===${N}"
 docker logs --tail 25 remnanode 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-150 | sed 's/^/  /'
-printf "\n%b\n" "  подробный отчёт: ${B}bash /opt/remnanode/node-setup.sh --status-only${N}"
+printf "\n%b\n" "  настройки: ${B}begleq${N}   ·   подробный отчёт: ${B}begleq${N} → 1"
 MOTD
   chmod +x /etc/update-motd.d/99-remnanode
 
@@ -448,10 +621,33 @@ MOTD
   done
   ok "лишние блоки приветствия отключены"
   ok "баннер при входе поставлен: /etc/update-motd.d/99-remnanode"
+  install_cli
 fi
 }
 
-say "${CB}node-setup v$VERSION${C0} — $(hostname), $(date '+%d.%m.%Y %H:%M %Z')"
+ALL_PRESETS_HINT="noisefloor subframe neonmile driftcult fieldroom dustline kissaten roastline reelpaper pixelpress sweaterweather monogrid tapehouse kanso studioquiet nexora riotgrain hexline filmgrain sunbleach makimahouse arcadechar phonkchar synthchar cinechar ghibliroom animecine kyotocine ambientcine gamecine"
+
+# в меню эта строка ни к чему — оно всё равно очищает экран
+[ "$MENU" = "1" ] || say "${CB}node-setup v$VERSION${C0} — $(hostname), $(date '+%d.%m.%Y %H:%M %Z')"
+
+if [ "$MENU" = "1" ]; then
+  menu_main
+  exit 0
+fi
+
+if [ "$WARP_OFF" = "1" ] || [ "$WARP_PURGE" = "1" ]; then
+  [ "$WARP_PURGE" = "1" ] && purge_warp || disable_warp
+  say ""
+  say "РЕЗУЛЬТАТ: ok"
+  exit 0
+fi
+
+if [ "$BBR_ONLY" = "1" ]; then
+  enable_bbr
+  say ""
+  say "РЕЗУЛЬТАТ: ok"
+  exit 0
+fi
 
 if [ "$WARP_ONLY" = "1" ]; then
   install_warp
@@ -592,6 +788,17 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -aq --filter name=remn
   fi
   if [ -n "${DOMAIN:-}" ]; then
     check_panel_inbound
+  fi
+
+  CC_NOW="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+  QD_NOW="$(sysctl -n net.core.default_qdisc 2>/dev/null)"
+  if [ "$CC_NOW" = "bbr" ]; then ok "BBR включён (qdisc: ${QD_NOW:-?})"
+  else warn "BBR выключен (сейчас ${CC_NOW:-?}) — включить: bash $0 --bbr-only"; fi
+
+  if ip link show warp >/dev/null 2>&1; then
+    WSTATE_NOW="$(curl -s --interface warp --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E '^warp=' | cut -d= -f2)"
+    if [ -n "$WSTATE_NOW" ]; then ok "WARP поднят и отвечает (warp=$WSTATE_NOW)"
+    else err "интерфейс warp есть, но трафик через него не идёт"; fi
   fi
 
   # TrafficGuard: пусто — не установлен, иначе показываем размеры списков
@@ -943,32 +1150,11 @@ fi
 # =============================================================================
 step "4/14  Сетевые лимиты и BBR"
 # =============================================================================
-cat > /etc/sysctl.d/99-remnanode.conf <<'SYSCTL'
-# сеть под VPN-нагрузку
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.ip_forward = 1
-net.ipv4.tcp_max_syn_backlog = 8192
-net.core.somaxconn = 8192
-fs.file-max = 1048576
-SYSCTL
-sysctl --system >/dev/null 2>&1
-CC_ALGO="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
-[ "$CC_ALGO" = "bbr" ] && ok "sysctl применён, congestion control: bbr" || warn "sysctl применён, congestion control: ${CC_ALGO:-?}"
-
-grep -q '^\* soft nofile' /etc/security/limits.conf 2>/dev/null || cat >> /etc/security/limits.conf <<'LIM'
-* soft nofile 1048576
-* hard nofile 1048576
-root soft nofile 1048576
-root hard nofile 1048576
-LIM
-ok "лимиты открытых файлов подняты"
+if [ "$DO_BBR" != "1" ]; then
+  warn "пропущено (--no-bbr)"
+else
+  enable_bbr
+fi
 
 # =============================================================================
 step "5/14  Docker"
