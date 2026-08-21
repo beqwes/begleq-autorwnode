@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="3.1"
+VERSION="4.0"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -246,11 +246,16 @@ TAB="$(printf '\t')"
 clear 2>/dev/null || printf '\033[2J\033[H'
 printf "%b" "${C}${B}"
 cat <<'BANNER'
-███  ████  ███ █    ████  ██       ███  ███   ██  ███
-█  █ █    █    █    █    █  █      █  █ █  █ █  █ █  █
-███  ███  █ ██ █    ███  █  █  ██  ███  ███  █  █ █  █
-█  █ █    █  █ █    █    █ ██      █    █ █  █  █ █  █
-███  ████  ███ ████ ████  ███      █    █  █  ██  ███
+██████    ████████    ██████  ██        ████████    ████              ██████    ██████      ████    ██████
+██████    ████████    ██████  ██        ████████    ████              ██████    ██████      ████    ██████
+██    ██  ██        ██        ██        ██        ██    ██            ██    ██  ██    ██  ██    ██  ██    ██
+██    ██  ██        ██        ██        ██        ██    ██            ██    ██  ██    ██  ██    ██  ██    ██
+██████    ██████    ██  ████  ██        ██████    ██    ██    ████    ██████    ██████    ██    ██  ██    ██
+██████    ██████    ██  ████  ██        ██████    ██    ██    ████    ██████    ██████    ██    ██  ██    ██
+██    ██  ██        ██    ██  ██        ██        ██  ████            ██        ██  ██    ██    ██  ██    ██
+██    ██  ██        ██    ██  ██        ██        ██  ████            ██        ██  ██    ██    ██  ██    ██
+██████    ████████    ██████  ████████  ████████    ██████            ██        ██    ██    ████    ██████
+██████    ████████    ██████  ████████  ████████    ██████            ██        ██    ██    ████    ██████
 BANNER
 printf "%b\n" "${N}"
 printf "%b\n" "  ${B}$(hostname)${N}  ·  $(date '+%d.%m.%Y %H:%M')  ·  аптайм $(uptime -p 2>/dev/null | sed 's/^up //')"
@@ -309,6 +314,17 @@ docker logs --tail 25 remnanode 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g' 
 printf "\n%b\n" "  подробный отчёт: ${B}bash /opt/remnanode/node-setup.sh --status-only${N}"
 MOTD
   chmod +x /etc/update-motd.d/99-remnanode
+
+  # штатный MOTD слишком болтливый: юридический текст Debian, реклама ESM,
+  # справка про справку. Права снимаем, а не удаляем — вернуть можно chmod +x
+  if [ -s /etc/motd ]; then
+    mv /etc/motd /etc/motd.disabled-by-node-setup
+    ok "текст /etc/motd убран (лежит рядом с пометкой .disabled-by-node-setup)"
+  fi
+  for f in 10-help-text 50-motd-news 91-contract-ua-esm-status 91-release-upgrade 50-landscape-sysinfo; do
+    [ -x "/etc/update-motd.d/$f" ] && chmod -x "/etc/update-motd.d/$f"
+  done
+  ok "лишние блоки приветствия отключены"
   ok "баннер при входе поставлен: /etc/update-motd.d/99-remnanode"
 fi
 }
@@ -941,227 +957,1091 @@ else
   [ -d "$WEBROOT" ] && [ -n "$(ls -A "$WEBROOT" 2>/dev/null)" ] && {
     cp -a "$WEBROOT" "${WEBROOT}.bak.$STAMP"; ok "старый сайт → ${WEBROOT}.bak.$STAMP"; }
 
-  # каждая нода получает свой музыкальный «лейбл»: стиль, палитра, шрифты и
-  # треки берутся случайно, поэтому две ноды не выглядят одинаково
-  # выбранный стиль уважаем, всё остальное считаем «на твой вкус»
-  case "$SITE_THEME" in
-    breakcore|lofi|dnb|synthwave|phonk|ambient) STYLE="$SITE_THEME" ;;
-    *) STYLE="$(shuf -e breakcore lofi dnb synthwave phonk ambient -n 1 2>/dev/null || echo lofi)" ;;
+  # пресет: раскладка + тема контента + палитра. Если не задан — случайный
+  ALL_PRESETS="noisefloor subframe neonmile driftcult fieldroom dustline kissaten roastline reelpaper pixelpress sweaterweather monogrid tapehouse kanso studioquiet nexora riotgrain hexline filmgrain sunbleach makimahouse arcadechar phonkchar synthchar cinechar ghibliroom animecine kyotocine ambientcine gamecine"
+  case " $ALL_PRESETS " in
+    *" $SITE_THEME "*) PRESET="$SITE_THEME" ;;
+    *) PRESET="$(shuf -e $ALL_PRESETS -n 1 2>/dev/null || echo noisefloor)" ;;
   esac
 
-  case "$STYLE" in
-    breakcore)
-      SITE_NAME="$(shuf -e NOISEFLOOR SPLICEGATE GRIDLOCK TAPEBURN NULLBEAT -n 1)"
-      TAGLINE="breakcore selections"; GENRE="breakcore / jungle"
-      ACC="#e5ff5a"; BG="#0a0a0b"; CARD="#121214"; FG="#e9e9ec"; MUT="#85858e"
-      GFONT="Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700"
-      FAM="'Space Grotesk', system-ui, sans-serif"; MONO="'Space Mono', ui-monospace, monospace"
-      TRACKS="1 hour breakcore mix reupload
-amen sister edit vip
-static bloom 174
-hyperloop cassette rip
-razor tape side b
-kick drum liturgy
-tokyo overdrive dub
-sunset in a washing machine
-final boss amen roll
-mono ghost pressing"
+  case "$PRESET" in
+    noisefloor)
+      LAYOUT=hero; TOPIC=breakcore
+      NAMES="NOISEFLOOR SPLICEGATE GRIDLOCK TAPEBURN NULLBEAT"
+      HEADLINE="ON AIR<br>AROUND THE CLOCK"; TAGLINE="breakcore selections"; LABEL="breakcore / jungle"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#000000"; PANEL="#0b0b0c"; CARD="#131315"; FG="#f4f4f5"; MUT="#8b8b93"
+      ACC="#e5ff5a"; ACC2="#ff3d7f"; LINE="#ffffff14"; BLEND="screen"
+      OVER="linear-gradient(180deg,#000000cc 0%,#00000055 34%,#000000f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#f4f4f5"; BTNFG="#000000"
       ;;
-    lofi)
-      SITE_NAME="$(shuf -e SLOWROOM PAPERTAPE DUSTLINE NIGHTDESK KOTATSU -n 1)"
-      TAGLINE="lo-fi tapes for late hours"; GENRE="lo-fi / chillhop"
-      ACC="#d9a066"; BG="#11100e"; CARD="#191714"; FG="#ece7de"; MUT="#8e877c"
-      GFONT="Inter:wght@400;500;700&family=JetBrains+Mono:wght@400;700"
-      FAM="'Inter', system-ui, sans-serif"; MONO="'JetBrains Mono', ui-monospace, monospace"
-      TRACKS="rain on the balcony
-cassette warmth loop
-4am study session
-tea gone cold
-window seat, slow train
-paper lantern
-old radio dust
-quiet floor two
-morning without alarm
-last bus home"
+    subframe)
+      LAYOUT=hero; TOPIC=dnb
+      NAMES="SUBFRAME ROLLERBOX DEEPWIRE STEPCTRL LOWEND"
+      HEADLINE="ROLLING<br>WITHOUT A BREAK"; TAGLINE="drum and bass archive"; LABEL="drum and bass / liquid"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#03121a"; PANEL="#061d27"; CARD="#0a2632"; FG="#e9f6fb"; MUT="#7ea6b4"
+      ACC="#43e0a0"; ACC2="#2f7dff"; LINE="#ffffff17"; BLEND="screen"
+      OVER="linear-gradient(180deg,#03121acc 0%,#03121a55 34%,#03121af2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#e9f6fb"; BTNFG="#03121a"
       ;;
-    dnb)
-      SITE_NAME="$(shuf -e SUBFRAME ROLLERBOX DEEPWIRE STEPCTRL LOWEND -n 1)"
-      TAGLINE="drum and bass archive"; GENRE="drum and bass / liquid"
-      ACC="#43e0a0"; BG="#080d0c"; CARD="#101917"; FG="#e6f2ee"; MUT="#7d938c"
-      GFONT="Barlow:wght@400;500;700&family=IBM+Plex+Mono:wght@400;700"
-      FAM="'Barlow', system-ui, sans-serif"; MONO="'IBM Plex Mono', ui-monospace, monospace"
-      TRACKS="liquid rollers vol.4
-two step warehouse
-deep bassline sketch
-amen revisited 174
-night drive rollout
-reese in the fog
-half time detour
-copper wire dub
-skyline pressure
-final rollout mix"
+    neonmile)
+      LAYOUT=hero; TOPIC=synthwave
+      NAMES="NEONMILE VHSDRIVE OUTRUNNER LASERGRID MIDNIGHT88"
+      HEADLINE="NIGHT DRIVE<br>NEVER ENDS"; TAGLINE="synthwave and retro drive"; LABEL="synthwave / outrun"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#0a0520"; PANEL="#150c33"; CARD="#1d1142"; FG="#f0ecff"; MUT="#9a90c4"
+      ACC="#ff5ea8"; ACC2="#4de2ff"; LINE="#ffffff1a"; BLEND="screen"
+      OVER="linear-gradient(180deg,#0a0520cc 0%,#0a052055 34%,#0a0520f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#f0ecff"; BTNFG="#0a0520"
       ;;
-    synthwave)
-      SITE_NAME="$(shuf -e NEONMILE VHS-DRIVE OUTRUNNER LASERGRID MIDNIGHT88 -n 1)"
-      TAGLINE="synthwave and retro drive"; GENRE="synthwave / outrun"
-      ACC="#ff5ea8"; BG="#0b0716"; CARD="#151029"; FG="#ece8ff"; MUT="#8d86ad"
-      GFONT="Orbitron:wght@500;700&family=Space+Mono:wght@400;700"
-      FAM="'Orbitron', system-ui, sans-serif"; MONO="'Space Mono', ui-monospace, monospace"
-      TRACKS="neon mile cruise
-vhs sunset tape
-turbo lane 1986
-chrome and rain
-arcade after midnight
-laser grid horizon
-cassette deck romance
-outrun the storm
-palm street signal
-credits roll"
+    driftcult)
+      LAYOUT=hero; TOPIC=phonk
+      NAMES="DRIFTCULT COWBELL9 MEMPHIS404 SLOWDRIFT BLACKTAPE"
+      HEADLINE="TAPES FOR<br>THE NIGHT SHIFT"; TAGLINE="phonk and drift tapes"; LABEL="phonk / drift"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#130a05"; PANEL="#1c1009"; CARD="#25160e"; FG="#f6ece4"; MUT="#a58a78"
+      ACC="#ff7a3d"; ACC2="#b14cff"; LINE="#ffffff17"; BLEND="screen"
+      OVER="linear-gradient(180deg,#130a05cc 0%,#130a0555 34%,#130a05f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#f6ece4"; BTNFG="#130a05"
       ;;
-    phonk)
-      SITE_NAME="$(shuf -e COWBELL9 DRIFTCULT MEMPHIS404 SLOWDRIFT BLACKTAPE -n 1)"
-      TAGLINE="phonk and drift tapes"; GENRE="phonk / drift"
-      ACC="#ff7a3d"; BG="#0d0a09"; CARD="#171210"; FG="#efe6e0"; MUT="#8f8078"
-      GFONT="Chakra+Petch:wght@500;700&family=Share+Tech+Mono"
-      FAM="'Chakra Petch', system-ui, sans-serif"; MONO="'Share Tech Mono', ui-monospace, monospace"
-      TRACKS="drift corner cowbell
-memphis tape loop
-midnight touge run
-slowed and reversed
-smoke on the overpass
-engine bay hymn
-concrete drift club
-tokyo night pass
-tyre smoke ritual
-last gear pull"
+    fieldroom)
+      LAYOUT=hero; TOPIC=ambient
+      NAMES="FIELDROOM SLOWGLASS QUIETMASS PALEHOUR DRIFTWOOD"
+      HEADLINE="SLOW AIR,<br>LONG FORM"; TAGLINE="ambient and field recordings"; LABEL="ambient / drone"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#e8eef2"; PANEL="#dce5eb"; CARD="#f3f7f9"; FG="#101a21"; MUT="#5e7180"
+      ACC="#2f7fae"; ACC2="#7aa7c7"; LINE="#0f1a2114"; BLEND="normal"
+      OVER="linear-gradient(180deg,#e8eef2d9 0%,#e8eef255 38%,#e8eef2fa 100%)"; CHIP="#ffffffbb"; CHIPB="#10202c1f"; BTNBG="#101a21"; BTNFG="#e8eef2"
       ;;
-    ambient)
-      SITE_NAME="$(shuf -e FIELDROOM SLOWGLASS QUIETMASS PALEHOUR DRIFTWOOD -n 1)"
-      TAGLINE="ambient and field recordings"; GENRE="ambient / drone"
-      ACC="#7ab8ff"; BG="#080a0d"; CARD="#101418"; FG="#e4eaf1"; MUT="#7d8894"
-      GFONT="Manrope:wght@400;500;700&family=Roboto+Mono:wght@400;700"
-      FAM="'Manrope', system-ui, sans-serif"; MONO="'Roboto Mono', ui-monospace, monospace"
-      TRACKS="glacier room tone
-pale hour drift
-harbour at four am
-snow static field
-long exposure pad
-slow glass motion
-distant turbine hum
-empty pool reverb
-winter window
-tape hiss lullaby"
+    dustline)
+      LAYOUT=editorial; TOPIC=lofi
+      NAMES="DUSTLINE PAPERTAPE SLOWROOM NIGHTDESK KOTATSU"
+      HEADLINE=""; TAGLINE="lo-fi tapes for late hours"; LABEL="lo-fi / chillhop"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#efece3"; PANEL="#e5e1d5"; CARD="#f6f4ee"; FG="#1b1a17"; MUT="#6f6a5d"
+      ACC="#4f8f96"; ACC2="#c07a4b"; LINE="#1b1a1722"; BLEND="normal"
+      OVER="linear-gradient(180deg,#efece3cc 0%,#efece355 34%,#efece3f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#1b1a17"; BTNFG="#efece3"
       ;;
+    kissaten)
+      LAYOUT=editorial; TOPIC=japan
+      NAMES="KISSATEN HANAMI YOKOCHO SHIORI TSUKIMI"
+      HEADLINE=""; TAGLINE="walks and quiet streets"; LABEL="japan / field notes"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#f6ecec"; PANEL="#eddede"; CARD="#fbf4f4"; FG="#241a1a"; MUT="#7d6262"
+      ACC="#c25b5b"; ACC2="#5b7dc2"; LINE="#241a1a1f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f6ececcc 0%,#f6ecec55 34%,#f6ececf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#241a1a"; BTNFG="#f6ecec"
+      ;;
+    roastline)
+      LAYOUT=editorial; TOPIC=coffee
+      NAMES="ROASTLINE SLOWPOUR CREMA BEANHAUS DRIPHOUSE"
+      HEADLINE=""; TAGLINE="notes on brewing"; LABEL="coffee / slow bar"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#f2ede4"; PANEL="#e7e0d2"; CARD="#faf7f1"; FG="#20180f"; MUT="#7a6a56"
+      ACC="#b4462f"; ACC2="#3f6f5f"; LINE="#20180f1f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f2ede4cc 0%,#f2ede455 34%,#f2ede4f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#20180f"; BTNFG="#f2ede4"
+      ;;
+    reelpaper)
+      LAYOUT=editorial; TOPIC=cinema
+      NAMES="REELPAPER FRAMESET LUMIERE SILVERSCREEN CINEROOM"
+      HEADLINE=""; TAGLINE="a paper about films"; LABEL="cinema / archive"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#e9f1ec"; PANEL="#dbe8e0"; CARD="#f4faf6"; FG="#141d18"; MUT="#5f7268"
+      ACC="#2f8f63"; ACC2="#8f6f2f"; LINE="#141d181f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#e9f1eccc 0%,#e9f1ec55 34%,#e9f1ecf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#141d18"; BTNFG="#e9f1ec"
+      ;;
+    pixelpress)
+      LAYOUT=editorial; TOPIC=gaming
+      NAMES="PIXELPRESS SAVEPOINT LOOTROOM CARTRIDGE OVERWORLD"
+      HEADLINE=""; TAGLINE="soundtracks and long sessions"; LABEL="games / soundtracks"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#eaeff5"; PANEL="#dbe4ee"; CARD="#f5f8fc"; FG="#121821"; MUT="#5f6c7d"
+      ACC="#3f6fbf"; ACC2="#bf7f3f"; LINE="#1218211f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#eaeff5cc 0%,#eaeff555 34%,#eaeff5f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#121821"; BTNFG="#eaeff5"
+      ;;
+    sweaterweather)
+      LAYOUT=split; TOPIC=coffee
+      NAMES="SWEATERWEATHER SLOWBAR NORTHROAST PAPERCUP EMBER"
+      HEADLINE="Talking about coffee, what's your opinion?"; TAGLINE="Is it a social lubricant or a dangerous stimulant?"; LABEL="coffee bar"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#faf8f5"; PANEL="#141210"; CARD="#f5f2ee"; FG="#141210"; MUT="#8b8378"
+      ACC="#141210"; ACC2="#6b6257"; LINE="#1412101a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#faf8f5cc 0%,#faf8f555 34%,#faf8f5f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#141210"; BTNFG="#faf8f5"
+      ;;
+    monogrid)
+      LAYOUT=split; TOPIC=tech
+      NAMES="MONOGRID BASELINE STUDIOZERO FORMLAB NORTHFORM"
+      HEADLINE="We build quiet things that keep working."; TAGLINE="Studio notes, process and shipped work"; LABEL="design studio"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#ffffff"; PANEL="#111111"; CARD="#fafafa"; FG="#111111"; MUT="#8a8a8a"
+      ACC="#111111"; ACC2="#555555"; LINE="#1111111a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#ffffffcc 0%,#ffffff55 34%,#fffffff2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#111111"; BTNFG="#ffffff"
+      ;;
+    tapehouse)
+      LAYOUT=split; TOPIC=lofi
+      NAMES="TAPEHOUSE SLOWDESK CASSETTA PAPERLOOP HUSHROOM"
+      HEADLINE="Tapes for the hours nobody schedules."; TAGLINE="Long selections, no ads, no accounts"; LABEL="tape room"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#f7f9fa"; PANEL="#0e1114"; CARD="#f2f5f7"; FG="#0e1114"; MUT="#7d858c"
+      ACC="#0e1114"; ACC2="#5b636a"; LINE="#0e11141a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f7f9facc 0%,#f7f9fa55 34%,#f7f9faf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#0e1114"; BTNFG="#f7f9fa"
+      ;;
+    kanso)
+      LAYOUT=split; TOPIC=japan
+      NAMES="KANSO SHIBUI MAROOM ENGAWA SUMIDA"
+      HEADLINE="Empty streets, early light, long walks."; TAGLINE="Recordings from cities that stay quiet"; LABEL="field notes"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#faf8f5"; PANEL="#141210"; CARD="#f5f2ee"; FG="#141210"; MUT="#8b8378"
+      ACC="#141210"; ACC2="#6b6257"; LINE="#1412101a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#faf8f5cc 0%,#faf8f555 34%,#faf8f5f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#141210"; BTNFG="#faf8f5"
+      ;;
+    studioquiet)
+      LAYOUT=split; TOPIC=ambient
+      NAMES="STUDIOQUIET LONGROOM PALEDESK STILLBOX SLOWWAVE"
+      HEADLINE="Sound that fills a room without asking."; TAGLINE="Ambient sessions and field recordings"; LABEL="listening room"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#f7f9fa"; PANEL="#0e1114"; CARD="#f2f5f7"; FG="#0e1114"; MUT="#7d858c"
+      ACC="#0e1114"; ACC2="#5b636a"; LINE="#0e11141a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f7f9facc 0%,#f7f9fa55 34%,#f7f9faf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#0e1114"; BTNFG="#f7f9fa"
+      ;;
+    nexora)
+      LAYOUT=halftone; TOPIC=tech
+      NAMES="NEXORA VANTIX ORBITAL NORTHPEAK LUMENARC"
+      HEADLINE="Bold Ideas That Start With Vision."; TAGLINE="We help modern brands craft digital stories that inspire action."; LABEL="studio"
+      TRUST="Trusted by teams of every scale"; PREV="Previous"; NEXT="Next"
+      BG="#ffffff"; PANEL="#111111"; CARD="#fafafa"; FG="#111111"; MUT="#8a8a8a"
+      ACC="#111111"; ACC2="#555555"; LINE="#1111111a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#ffffffcc 0%,#ffffff55 34%,#fffffff2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#111111"; BTNFG="#ffffff"
+      ;;
+    riotgrain)
+      LAYOUT=halftone; TOPIC=breakcore
+      NAMES="RIOTGRAIN HARDEDGE SPLITSEC RAWFEED CRUSHER"
+      HEADLINE="Loud Ideas That Refuse To Sit Still."; TAGLINE="Long sets, sharp edits and nothing safe"; LABEL="label"
+      TRUST="Played by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#f7f9fa"; PANEL="#0e1114"; CARD="#f2f5f7"; FG="#0e1114"; MUT="#7d858c"
+      ACC="#0e1114"; ACC2="#5b636a"; LINE="#0e11141a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f7f9facc 0%,#f7f9fa55 34%,#f7f9faf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#0e1114"; BTNFG="#f7f9fa"
+      ;;
+    hexline)
+      LAYOUT=halftone; TOPIC=gaming
+      NAMES="HEXLINE SAVESTATE PIXELWORKS ARCADIA BITHOUSE"
+      HEADLINE="Soundtracks That Carry The Whole Run."; TAGLINE="Full scores from games that stayed with people"; LABEL="archive"
+      TRUST="Trusted by players of every kind"; PREV="Previous"; NEXT="Next"
+      BG="#faf8f5"; PANEL="#141210"; CARD="#f5f2ee"; FG="#141210"; MUT="#8b8378"
+      ACC="#141210"; ACC2="#6b6257"; LINE="#1412101a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#faf8f5cc 0%,#faf8f555 34%,#faf8f5f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#141210"; BTNFG="#faf8f5"
+      ;;
+    filmgrain)
+      LAYOUT=halftone; TOPIC=cinema
+      NAMES="FILMGRAIN REELWORKS SILVERHALIDE CUTROOM PROJECTOR"
+      HEADLINE="Every Frame Deserves A Second Look."; TAGLINE="Trailers, scores and the rooms that made them"; LABEL="cinema"
+      TRUST="Screened in every kind of room"; PREV="Previous"; NEXT="Next"
+      BG="#ffffff"; PANEL="#111111"; CARD="#fafafa"; FG="#111111"; MUT="#8a8a8a"
+      ACC="#111111"; ACC2="#555555"; LINE="#1111111a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#ffffffcc 0%,#ffffff55 34%,#fffffff2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#111111"; BTNFG="#ffffff"
+      ;;
+    sunbleach)
+      LAYOUT=halftone; TOPIC=japan
+      NAMES="SUNBLEACH ASAHIROOM KOMOREBI SHIOKAZE HIROBA"
+      HEADLINE="Cities Recorded At Walking Speed."; TAGLINE="Long walks, quiet streets, nothing staged"; LABEL="field"
+      TRUST="Followed by walkers of every pace"; PREV="Previous"; NEXT="Next"
+      BG="#faf8f5"; PANEL="#141210"; CARD="#f5f2ee"; FG="#141210"; MUT="#8b8378"
+      ACC="#141210"; ACC2="#6b6257"; LINE="#1412101a"; BLEND="normal"
+      OVER="linear-gradient(180deg,#faf8f5cc 0%,#faf8f555 34%,#faf8f5f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#141210"; BTNFG="#faf8f5"
+      ;;
+    makimahouse)
+      LAYOUT=character; TOPIC=anime
+      NAMES="MAKIMAHOUSE DEVILHUNT REDCOLLAR NOCTURNE SAKURAFIST"
+      HEADLINE="Openings, endings and everything between."; TAGLINE="anime openings in 4k"; LABEL="character / anime"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#f6ecec"; PANEL="#eddede"; CARD="#fbf4f4"; FG="#241a1a"; MUT="#7d6262"
+      ACC="#c25b5b"; ACC2="#5b7dc2"; LINE="#241a1a1f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f6ececcc 0%,#f6ecec55 34%,#f6ececf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#241a1a"; BTNFG="#f6ecec"
+      ;;
+    arcadechar)
+      LAYOUT=character; TOPIC=gaming
+      NAMES="ARCADECHAR PLAYERTWO CONTINUE9 SAVEROOM BOSSRUSH"
+      HEADLINE="Every run has a soundtrack."; TAGLINE="full soundtracks from long nights"; LABEL="games / scores"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#e9f1ec"; PANEL="#dbe8e0"; CARD="#f4faf6"; FG="#141d18"; MUT="#5f7268"
+      ACC="#2f8f63"; ACC2="#8f6f2f"; LINE="#141d181f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#e9f1eccc 0%,#e9f1ec55 34%,#e9f1ecf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#141d18"; BTNFG="#e9f1ec"
+      ;;
+    phonkchar)
+      LAYOUT=character; TOPIC=phonk
+      NAMES="PHONKCHAR DRIFTKING COWBELLCLUB SMOKEROOM NIGHTPASS"
+      HEADLINE="Cowbell, smoke and the whole corner."; TAGLINE="phonk and drift tapes"; LABEL="phonk / drift"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#f2ede4"; PANEL="#e7e0d2"; CARD="#faf7f1"; FG="#20180f"; MUT="#7a6a56"
+      ACC="#b4462f"; ACC2="#3f6f5f"; LINE="#20180f1f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f2ede4cc 0%,#f2ede455 34%,#f2ede4f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#20180f"; BTNFG="#f2ede4"
+      ;;
+    synthchar)
+      LAYOUT=character; TOPIC=synthwave
+      NAMES="SYNTHCHAR NEONCHILD GRIDRUNNER VHSKID CHROMEHEART"
+      HEADLINE="The city is faster after midnight."; TAGLINE="synthwave and retro drive"; LABEL="synth / outrun"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#eaeff5"; PANEL="#dbe4ee"; CARD="#f5f8fc"; FG="#121821"; MUT="#5f6c7d"
+      ACC="#3f6fbf"; ACC2="#bf7f3f"; LINE="#1218211f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#eaeff5cc 0%,#eaeff555 34%,#eaeff5f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#121821"; BTNFG="#eaeff5"
+      ;;
+    cinechar)
+      LAYOUT=character; TOPIC=cinema
+      NAMES="CINECHAR ROLECALL SCREENTEST FRAMEONE CASTROOM"
+      HEADLINE="Films remembered by their faces."; TAGLINE="trailers and scores"; LABEL="cinema / archive"
+      TRUST="Trusted by rooms of every size"; PREV="Previous"; NEXT="Next"
+      BG="#efece3"; PANEL="#e5e1d5"; CARD="#f6f4ee"; FG="#1b1a17"; MUT="#6f6a5d"
+      ACC="#4f8f96"; ACC2="#c07a4b"; LINE="#1b1a1722"; BLEND="normal"
+      OVER="linear-gradient(180deg,#efece3cc 0%,#efece355 34%,#efece3f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#1b1a17"; BTNFG="#efece3"
+      ;;
+    ghibliroom)
+      LAYOUT=cinema; TOPIC=cinema
+      NAMES="GHIBLIROOM LANTERNHILL QUIETFILM SOFTREEL PAPERMOON"
+      HEADLINE="A room that plays one film at a time."; TAGLINE="films and their scores"; LABEL="cinema"
+      TRUST="Trusted by rooms of every size"; PREV="Previous session"; NEXT="Next session"
+      BG="#eaeff5"; PANEL="#dbe4ee"; CARD="#f5f8fc"; FG="#121821"; MUT="#5f6c7d"
+      ACC="#3f6fbf"; ACC2="#bf7f3f"; LINE="#1218211f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#eaeff5cc 0%,#eaeff555 34%,#eaeff5f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#121821"; BTNFG="#eaeff5"
+      ;;
+    animecine)
+      LAYOUT=cinema; TOPIC=anime
+      NAMES="ANIMECINE OPENINGROOM SAKURACUT REDPETAL FRAMEIDOL"
+      HEADLINE="Openings that are better than the show."; TAGLINE="anime openings in 4k"; LABEL="anime"
+      TRUST="Trusted by rooms of every size"; PREV="Earlier openings"; NEXT="Later openings"
+      BG="#f6ecec"; PANEL="#eddede"; CARD="#fbf4f4"; FG="#241a1a"; MUT="#7d6262"
+      ACC="#c25b5b"; ACC2="#5b7dc2"; LINE="#241a1a1f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f6ececcc 0%,#f6ecec55 34%,#f6ececf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#241a1a"; BTNFG="#f6ecec"
+      ;;
+    kyotocine)
+      LAYOUT=cinema; TOPIC=japan
+      NAMES="KYOTOCINE LONGWALK MACHIYA RIVERSIDE ASAGIRI"
+      HEADLINE="Walk the city without leaving the room."; TAGLINE="long walks in 4k"; LABEL="japan"
+      TRUST="Trusted by rooms of every size"; PREV="Yesterday's walk"; NEXT="Tomorrow's walk"
+      BG="#e9f1ec"; PANEL="#dbe8e0"; CARD="#f4faf6"; FG="#141d18"; MUT="#5f7268"
+      ACC="#2f8f63"; ACC2="#8f6f2f"; LINE="#141d181f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#e9f1eccc 0%,#e9f1ec55 34%,#e9f1ecf2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#141d18"; BTNFG="#e9f1ec"
+      ;;
+    ambientcine)
+      LAYOUT=cinema; TOPIC=ambient
+      NAMES="AMBIENTCINE SLOWFRAME LONGEXPOSURE STILLROOM PALEREEL"
+      HEADLINE="Sound designed to be left running."; TAGLINE="ambient sessions"; LABEL="ambient"
+      TRUST="Trusted by rooms of every size"; PREV="Previous session"; NEXT="Next session"
+      BG="#efece3"; PANEL="#e5e1d5"; CARD="#f6f4ee"; FG="#1b1a17"; MUT="#6f6a5d"
+      ACC="#4f8f96"; ACC2="#c07a4b"; LINE="#1b1a1722"; BLEND="normal"
+      OVER="linear-gradient(180deg,#efece3cc 0%,#efece355 34%,#efece3f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#1b1a17"; BTNFG="#efece3"
+      ;;
+    gamecine)
+      LAYOUT=cinema; TOPIC=gaming
+      NAMES="GAMECINE CREDITSROLL FINALSAVE ENDGAME SCOREROOM"
+      HEADLINE="Scores that outlived their games."; TAGLINE="full game soundtracks"; LABEL="games"
+      TRUST="Trusted by rooms of every size"; PREV="Previous score"; NEXT="Next score"
+      BG="#f2ede4"; PANEL="#e7e0d2"; CARD="#faf7f1"; FG="#20180f"; MUT="#7a6a56"
+      ACC="#b4462f"; ACC2="#3f6f5f"; LINE="#20180f1f"; BLEND="normal"
+      OVER="linear-gradient(180deg,#f2ede4cc 0%,#f2ede455 34%,#f2ede4f2 100%)"; CHIP="#ffffff0f"; CHIPB="#ffffff24"; BTNBG="#20180f"; BTNFG="#f2ede4"
+      ;;
+  esac
+  SITE_NAME="$(shuf -e $NAMES -n 1 2>/dev/null || echo "${NAMES%% *}")"
+  GENRE="$LABEL"
+
+  case "$TOPIC" in
+    breakcore) TRACKS="X6nEHPgPRXI|1 hour breakcore mix \\reupload|limiminami|1:26:58
+2i9vG5ZtK3c|starry breakcore mix|masen|1:11:12
+6l5kJUWhDqQ|1 HOUR BREAKCORE FOR YOUR CORE / Music Playlist if you Broken|CURSEDEVIL|1:02:52
+BhZ0Ky9uqts|Breakcore mix to dissociate to|Utsudere|1:43:22
+CtSc5Gn6xvY|breakcore / jungle / ambient dnb mix to dive into the unknown|fever recognition|2:32:30
+bunBUv4hDj4|1 Hour Of Breakcore That Makes You Feel The Vibe|Alithium Music Archive|1:01:56
+gKh5eyGE9fs|Breakcore: The Sounds of Destruction [ breakcore mix to die to o|AngelSvrgery|2:19:10
+lZUOxJbvCmY|【 𝗯𝗿𝗲𝗮𝗸𝗰𝗼𝗿𝗲/𝗷𝘂𝗻𝗴𝗹𝗲/𝗱𝗻𝗯 𝗺𝗶𝘅 𝗳𝗼𝗿 𝙡𝙤𝙘𝙠𝙞𝙣𝙜 𝙩𝙛 𝙞𝙣 】|deltea|1:05:40
+v9ykDyCR3TY|【𝟐𝟎𝟐𝟒 𝐇𝐞𝐚𝐯𝐞𝐧𝐥𝐲 𝐁𝐫𝐞𝐚𝐤𝐜𝐨𝐫𝐞 𝐌𝐢𝐱 - 𝟏 𝐇𝐨𝐮𝐫 🎧】|Lix|1:00:45" ;;
+    lofi) TRACKS="LTphVIore3A|No Copyright Music Playlist - 1 Hour Lofi Hip Hop Mix|Super Lofi World|1:41:00
+n61ULEU7CO0|Best of lofi hip hop 2021 ✨ [beats to relax/study to]|Lofi Girl|6:10:58
+CFGLoQIhmow|lofi hip hop mix 📚 beats to relax/study to (Part 1)|Lofi Girl|2:50:41
+8b3fqIBrNW0|lofi hip hop mix 📚 beats to relax/study to (Part 2)|Lofi Girl|4:05:02
+TbAjL4qgzC0|Lo-Fi Homer CHILL / STUDY / RELAX / SLEEP ONE HOUR|TheRealPaul|1:07:54
+82ujdQBjpDQ|Quiet Solitude - Lofi Song ~ Lofi hip hop mix ~ Stress Relief / |Chilli High|11:54:56
+lTRiuFIWV54|1 A.M Study Session 📚 [lofi hip hop]|Lofi Girl|1:01:14
+CLeZyIID9Bo|Chill Lofi Mix [chill lo-fi hip hop beats]|Settle|1:44:52
+l_7e2ZamUpI|Chillhop Drive 90's - Lofi hip hop ~ Deep Focus, Relaxing Music |chilli music|24:04:20" ;;
+    dnb) TRACKS="R8MWKsheHxk|'The Journey' (2 Hour Drum & Bass Mix)|SuicideSheeep|1:54:21
+7j4WQ5qOBZY|Best Drum & Bass Mix 2020 (Melodic/Liquid Drum and Bass)|MrMoMMusic|2:28:40
+9r-crUUUU50|1 Hour Unbelievable Liquid Drum & Bass Mega Mix|ThaLineBass|1:01:25
+CxvPDeJJK8c|1 HOUR - LIQUID DRUM & BASS SUMMER MIX 2024 [NO ADS]|FINAL CONTACT|1:10:06
+PUsk2mrXvKo|Dark n Heavy Drum & Bass MIX [1 Hour 1080p HD]|Evil Bass Mixes|59:51
+9ogliXhWcg4|1 HOUR DRUM & BASS - OCT 2025|xKito Music|1:01:22
+iFeg7F2q-PU|Chill Liquid Drum and Bass Mix #3|U:Fourier UK|2:42:09
+LeMk0yiSoq4|UKF Drum & Bass: Best of Drum & Bass 2023 Mix|UKF Drum & Bass|1:16:32
+mbNi5L3QOCA|(5 Hours) Best Liquid Drum and Bass mix [Study / Chill DnB]|Rubee|5:01:13" ;;
+    synthwave) TRACKS="MxGJCjNa-80|/ L O S T N I G H T S / - A NewRetroWave Mix / 1 Hour / Synthwav|NewRetroWave|1:12:20
+S10zEFq_wmg|２𝟶４９ // 𝗠𝗜𝗗𝗡𝗜𝗚𝗛𝗧 𝗗𝗥𝗜𝗩𝗘 / 1 HOUR SYNTHWAVE MIX|PHONKONAUT|1:08:32
+zvTgZ2ch7aU|1 Hour Synthwave for Coding, Work & Focus|Neon Dusk Radio|1:00:16
+_Gajv2yJt5M|𝟭𝟵𝟵𝟵 𝗗𝗥𝗜𝗙𝗧 𝗜𝗡𝗧𝗢 𝗠𝗘𝗠𝗢𝗥𝗬 // Synthwave, Vaporwave, Cyberpunk, Chill|Moebius FM|2:07:10
+QvSN30awLK8|Synthwave mix night drive / Synthwave 10 hours|Cat the Driver - Background Music|10:00:01
+QHnYKXQkZjk|P L I S S K E N - A NewRetroWave Mix / 1 Hour / Retrowave/ Dream|NewRetroWave|1:00:39
+LLPoZGX0qZk|'OUTRUN' / Best of Synthwave And Retro Electro Music Mix for 1 H|ThePrimeThanatos|1:02:08
+Swu5uIhe-Ms|M E M O R I E S - A NewRetroWave Mix / 1 Hour / Synthwave/ Retro|NewRetroWave|1:07:06
+LTln_sCHfQs|🎷 1 Hour No Copyright 80s Synthwave Retro Electro Wave Music Lon|Aries Beats [Free Retro Music Producer & Composer]|57:58" ;;
+    phonk) TRACKS="Ljq0c5C7LuM|TOP VIRAL PHONK/FUNK PLAYLIST 🔥 / TIKTOK PHONK 2025🔥|Twisco|1:01:40
+7vFMAZD37X4|AURA = ♾️ / 1 HOUR VIRAL AURA MUSIC PLAYLIST 2026 🔥 TRENDING PHO|EMPIRE PHONK|1:20:03
+_xUxFLEP6gc|Phonk Music Mix 2025 ※ 1 HOUR AGGRESSIVE PHONK PLAYLIST ※ Фонка |PHONK Club|1:47:37
+6FvnWof4xL8|TOP 50 MOST VIRAL PHONK/FUNK 2026 🔥🎵 PLAYLIST 🎵|Twisco|1:37:37
+KfX9rDANEfE|ULTIMATE VIRAL PHONK/FUNK PLAYLIST 🔥 / TIKTOK PHONK 2026🔥🎵|Twisco|1:45:32
+y1ELYBtvKFQ|Phonk Music Mix 2025 🎶 1 HOUR PHONK PLAYLIST 🎶|SynthWavesZ|1:01:20
+m_52WB-sYd4|Mix of the BEST BRAZILIAN PHONK of 2025-2026🎵|Superior|1:04:06
+xwyh6yg7rEo|Phonk Vol 2 - Music Mix 2025 🎶 1 HOUR PHONK PLAYLIST 🎶|SynthWavesZ|1:01:42
+c2t7abhod10|AURA = ♾️ / 1 HOUR VIRAL AURA MUSIC PLAYLIST 2026 🔥 TRENDING PHO|EMPIRE PHONK|1:12:25" ;;
+    ambient) TRACKS="NaZeslUINF4|best of øneheart, antent, reidenshi, tilekid, knonzzz / ambient |dreamslow|1:00:44
+WxQIUXnokAo|ambient era / antent ambient songs (2022-2024)|Antent|2:37:10
+O5p2ZX7UU9w|forgotten dreams // dark ambient music mix|dreamscape|1:01:39
+hzLdZWIeq3c|best of øneheart // ambient mix|dreamscape|36:54
+Rv0QsmjIQ_U|a coldcore ambient playlist|Zerofuturism|1:22:54
+Jk1TyOSQi5s|best of antent // ambient mix|dreamscape|47:25
+NGiTTTimQ_8|Aphex Twin Ambient Mix (Reupload with the original gif)|Hender|2:14:02
+roMz1PPslbM|escape everything // dark ambient music mix|dreamscape|54:28
+4Yn8-2NkrYk|Risen 1 Soundtrack / Ambient Mix (1 Hour)|Craft of Ambience|1:00:01" ;;
+    coffee) TRACKS="XlLqJwJHjp0|How To Make Pour Over Coffee - SIMPLE V60 Brew Tutorial|Mirror Coffee Roasters|4:06
+dS9NwmLtDsA|HOW TO POUROVER: Understanding Pourover Coffee / Percolation|Lance Hedrick|29:07
+3SIFFaT1MFU|Winning POUR OVER Recipe from World Brewers Cup Champion (Martin|European Coffee Trip|8:46
+1oB1oDrDkHM|A Better 1 Cup V60 Technique|James Hoffmann|10:25
+sHnsCa3-W4Y|Pour Over Coffee for Beginners / Pour Over 101|HomeGrounds Coffee|9:00
+AI4ynXzkSQo|The Ultimate V60 Technique|James Hoffmann|12:11
+2mrLiE4ilXw|Pourover Lesson for Advanced Brewers|Lance Hedrick|17:11
+mMwscUNKbPk|How To Avoid A Bad Pour Over Brew|James Hoffmann|13:18
+o97e_mGejiw|Beginners Guide To Making Pour-Over Coffee At Home (Without a Sc|Espresso Doc.|3:55" ;;
+    tech) TRACKS="hGaC1w1ibEg|Dezea® Studio — Showreel [ 2024 ]|Dezea Studio|1:16
+5wUVJ5uDn0k|YS DESIGN SHOWREEL 2024|Yakovlevsky - Creative Design Studio|1:58
+bRyU3gco_dY|Pixtar Brand Design Agency Showreel 2024|Pixtar Brand Design Agency - Dubai|3:56
+gOOxscC3oDA|Boyutgraf Creative Agency 2024 Showreel|Boyutgraf|1:54
+TXsNnOOCSIU|Obys Showreel 2024|Design Education Series® by Obys®|1:16
+x6zrGTvsv4g|Our Showreel / Creative Agency Dubai / Moonbox|Moonbox|1:15
+2Fo0kt36Dtc|MOOCH DESIGN STUDIO SHOWREEL 2024|MOOCH|1:26
+5p_Dh1yhCV8|Creative Agency Showreel / Abdy Studio|abdystudio|1:30
+SaOwutdzd24|Halo showreel. A design-led creative agency.|Halo Advertising|2:01" ;;
+    anime) TRACKS="WO8SoTZ8QTM|Naruto Shippuden Op/ Opening 16 [4k 60 FSP]|NakiriSaku ,|1:32
+st4wcpjZeQQ|Demon Slayer - Opening 3 / 4K / 60FPS / Creditless /|Anicrad|2:02
+Bt3D3Ca9nww|Death Note OP 1 [4K / 60FPS / Creditless]|Alina|1:21
+dy7gr0vaNho|Steins;Gate - Opening 【Hacking to the Gate】 4K 60FPS Creditless |Neobrane|2:09
+gjD_x4222Q8|Tokyo Ghoul Opening 1 (4k 60FPS)┃Creditless|KaizenK|1:47
+4qXzCm9sRxE|[Creditless] Fate/stay night UBW OP [Brave Shine] [4K HDR] [60FP|Nephastion|1:53
+XSo75BY-es4|One Piece - Opening 26 【Uuuuus!】 4K 60FPS / CC|Neobrane|2:04
+fBsfD0Eytjw|Your Lie in April - Opening 1 【Hikaru nara】 4K 60FPS Creditless |Neobrane|2:05
+SJkCLcnGB-c|JoJo's Bizarre Adventure - Opening 2 [4K 60FPS / Creditless / CC|Neobrane|2:04" ;;
+    cinema) TRACKS="I1dHzoRl0sQ|PRINCESS MONONOKE 4K Remaster / Official IMAX Trailer|GKIDS Films|1:39
+iwROgK94zcM|Howl's Moving Castle - Official Trailer|Crunchyroll Store Australia|1:36
+vf6c6n35wr4|PRINCESS MONONOKE / Official English Trailer|GKIDS Films|1:04
+PhHoCnRg1Yw|THE WIND RISES Trailer / Festival 2013|TIFF|4:17
+ByXuk9QqQkk|Spirited Away - Official Trailer|Crunchyroll Store Australia|2:27
+5fW_H88W2VE|Studio Ghibli / Official Trailer / The Classics|StudiocanalUK|1:13
+oCIeWol8jVk|Howl's Moving Castle - Celebrate Studio Ghibli - Official Traile|Crunchyroll Store Australia|1:31
+GAp2_0JJskk|SPIRITED AWAY / Official Trailer|GKIDS Films|1:00
+h6XP82TyFWw|PONYO / Official English Trailer|GKIDS Films|1:57" ;;
+    japan) TRACKS="arOQ7slh3pM|Kyoto, Japan 4K Walking Tour - Captions & Immersive Sound [4K Ul|HP Walking Tours|1:11:42
+SKJG4xqdH_0|Spring Morning Walk through Historic Higashiyama / Kyoto, Japan |Ambient Exploration|2:06:52
+qgfd-uWTVwg|Walk in Kyoto Midnight Rainstorm - 4K HDR|VIRTUAL JAPAN|58:53
+QP11A3q7ZP4|🇯🇵 Japan Walking Tour - Wandering Historic Streets of Kyoto [ 4K|World Wanderings: 4K Walking Tours|1:22:08
+YlNDqTN8e_g|Sunset Walk on Side Streets and Iconic Sights / Kyoto, Japan 4K|Ambient Exploration|2:26:59
+8zcPIr0mDzU|Kyoto Hidden Valleys Drive 🌿 Arashiyama to Kibune / 8K 60fps HDR|Abao Vision|1:33:12
+pQzt0sQ3Pio|Quiet Dawn Walk along Philosopher's Path / Kyoto, Japan 4K Morni|Ambient Exploration|1:48:48
+OjHbS-_nncw|🇯🇵 Japan Walking Tour - Discovering Kyoto’s Suburban Streets in |World Wanderings: 4K Walking Tours|1:08:10
+XSaF_sDxLdo|Kyoto Morning Walk through Temples and Neighborhoods / Japan 4K|Ambient Exploration|1:53:10" ;;
+    gaming) TRACKS="nnvjKf_mRYM|[Official] TUNIC (Original Soundtrack) - Full Album / Lifeformed|Lifeformed|3:01:50
+VWziHqEd0Uw|Diablo 2 - Complete Soundtrack HD|Jesterhead|1:42:54
+B_3FKsiNOrU|MENACE / Official Game Soundtrack / Full Album|Scott Buckley|1:27:13
+gkntjUvYDDo|Alkis Livathinos - HUE Official Soundtrack [Full Album] / Instru|Alkis Livathinos|58:35
+3GRKJ87S5cI|Hades: Original Soundtrack - Full Album|Supergiant Games|2:29:44
+uH3Aoj1nw58|Pyre Original Soundtrack - Full Album|Supergiant Games|1:51:10
+I6rufOlNyYM|Gris - Original Game Soundtrack (full ost official video)|berlinist|1:19:29
+7kvmPh2nYBM|Journey OST ♬ Complete Original Soundtrack|Jepedillo|57:26
+3djZ6rgdHhE|Baldur's Gate 3 - Extended Soundtrack [OST / Music]|Pharysz|2:53:23" ;;
   esac
 
   YEAR="$(date +%Y)"
   mkdir -p "$WEBROOT/assets" "$WEBROOT/archive" "$WEBROOT/about"
 
-  # ---------- стили ----------
-  cat > "$WEBROOT/assets/style.css" <<'CSS'
-:root{--bg:__BG__;--card:__CARD__;--fg:__FG__;--mut:__MUT__;--acc:__ACC__;--line:#ffffff14}
+  # обложки берём с ютуба: у длинных роликов почти всегда есть maxres
+  thumb() {
+    if curl -sfI --max-time 8 "https://i.ytimg.com/vi/$1/maxresdefault.jpg" >/dev/null 2>&1; then
+      printf 'https://i.ytimg.com/vi/%s/maxresdefault.jpg' "$1"
+    else
+      printf 'https://i.ytimg.com/vi/%s/hqdefault.jpg' "$1"
+    fi
+  }
+
+  F_ID="$(printf '%s\n' "$TRACKS" | sed -n 1p | cut -d'|' -f1)"
+  F_TIT="$(printf '%s\n' "$TRACKS" | sed -n 1p | cut -d'|' -f2)"
+  F_CH="$(printf '%s\n' "$TRACKS" | sed -n 1p | cut -d'|' -f3)"
+  F_LEN="$(printf '%s\n' "$TRACKS" | sed -n 1p | cut -d'|' -f4)"
+  T2="$(printf '%s\n' "$TRACKS" | sed -n 2p | cut -d'|' -f1)"
+  T3="$(printf '%s\n' "$TRACKS" | sed -n 3p | cut -d'|' -f1)"
+  HERO="$(thumb "$F_ID")"
+  N_TRACKS="$(printf '%s\n' "$TRACKS" | grep -c '|')"
+  LOGOS_HTML="<span>MERCURY</span><span>ramp</span><span>HEX</span><span>Vercel</span><span>descript</span><span>Cash App</span><span>SUPERCELL</span><span>runway</span>"
+
+  # штрихкод для журнальной обложки
+  BARCODE="$(i=0; printf '<div class=\"strip\">'; while [ $i -lt 26 ]; do printf '<i style=\"height:%d%%\"></i>' $(( (i * 37 % 55) + 45 )); i=$((i+1)); done; printf '</div>')"
+
+  case "$LAYOUT" in
+    hero)
+      GFONTS="Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700"
+      cat > "$WEBROOT/assets/style.css" <<CSS
+:root{--bg:$BG;--panel:$PANEL;--card:$CARD;--line:$LINE;--fg:$FG;--mut:$MUT;--acc:$ACC;--acc2:$ACC2;--r:26px}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font-family:__FAM__;line-height:1.6;
-  background-image:radial-gradient(60rem 30rem at 80% -10%, __ACC__14, transparent 60%)}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);line-height:1.45;
+  font-family:'Space Grotesk',system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}
-.wrap{max-width:1080px;margin:0 auto;padding:0 22px}
-header{position:sticky;top:0;z-index:9;background:__BG__e6;backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
-header .wrap{display:flex;align-items:center;gap:20px;height:64px}
-.logo{font-weight:700;letter-spacing:.14em;font-size:15px}
-.live{font-family:__MONO__;font-size:11px;color:var(--acc);border:1px solid var(--acc);
-  border-radius:999px;padding:3px 10px;letter-spacing:.12em}
-.live i{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--acc);
-  margin-right:6px;animation:pulse 1.6s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-nav{margin-left:auto;display:flex;gap:18px;font-size:13px;color:var(--mut);font-family:__MONO__}
-nav a:hover{color:var(--acc)}
-.hero{padding:64px 0 26px}
-.hero h1{font-size:clamp(38px,7vw,74px);line-height:.98;margin:0 0 12px;letter-spacing:-.03em}
-.hero p{color:var(--mut);margin:0;font-family:__MONO__;font-size:13px;letter-spacing:.1em;text-transform:uppercase}
-.player{margin:26px 0 12px;border:1px solid var(--line);border-radius:16px;background:var(--card);overflow:hidden}
-.player .top{display:flex;gap:18px;padding:18px;align-items:center}
-.cover{width:96px;height:96px;border-radius:10px;flex:none;
-  background:linear-gradient(135deg,__ACC__,#ffffff10);position:relative;overflow:hidden}
-.cover span{position:absolute;inset:auto 8px 8px 8px;font-family:__MONO__;font-size:10px;color:#0009}
-.np{flex:1;min-width:0}
-.np small{font-family:__MONO__;font-size:11px;color:var(--mut);letter-spacing:.14em;text-transform:uppercase}
-.np h3{margin:4px 0 10px;font-size:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bar{height:4px;border-radius:2px;background:#ffffff14;overflow:hidden}
-.bar i{display:block;height:100%;width:12%;background:var(--acc)}
-.time{display:flex;justify-content:space-between;font-family:__MONO__;font-size:11px;color:var(--mut);margin-top:6px}
-.eq{display:flex;gap:3px;align-items:flex-end;height:28px}
-.eq b{width:4px;background:var(--acc);border-radius:2px;animation:eq 1.1s infinite ease-in-out}
+img{display:block;max-width:100%}
+.wrap{max-width:1240px;margin:0 auto;padding:0 20px}
+.mono{font-family:'Space Mono',ui-monospace,monospace}
+
+.top{position:absolute;left:0;right:0;top:0;z-index:5}
+.top .wrap{display:flex;align-items:center;gap:26px;height:78px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.02em;color:var(--fg)}
+.brand i{width:22px;height:22px;border-radius:50%;background:var(--acc);display:block}
+.top nav{display:flex;gap:22px;font-size:13.5px;color:var(--fg);opacity:.82}
+.top nav a:hover{color:var(--acc);opacity:1}
+.pill{margin-left:auto;display:flex;align-items:center;gap:9px;background:$BTNBG;color:$BTNFG;
+  border-radius:999px;padding:9px 9px 9px 20px;font-size:13.5px;font-weight:500}
+.pill b{width:30px;height:30px;border-radius:50%;background:$BTNFG;color:$BTNBG;display:grid;
+  place-items:center;font-size:13px}
+
+.hero{position:relative;min-height:660px;border-radius:0 0 var(--r) var(--r);overflow:hidden;
+  display:flex;align-items:flex-end;isolation:isolate}
+.hero .bg{position:absolute;inset:0;z-index:-2;width:100%;height:100%;object-fit:cover;filter:saturate(.6) contrast(1.05)}
+.hero::after{content:"";position:absolute;inset:0;z-index:-1;background:$OVER}
+.hero .title{position:absolute;left:0;right:0;top:96px;text-align:center;pointer-events:none}
+.hero .title h1{margin:0;font-size:clamp(56px,15.5vw,210px);line-height:.82;letter-spacing:-.045em;
+  font-weight:700;color:var(--fg);mix-blend-mode:$BLEND}
+.hero .foot{width:100%;padding:0 0 40px;position:relative}
+.hero .foot .wrap{display:flex;align-items:flex-end;gap:26px;flex-wrap:wrap}
+.hero .lead{max-width:430px}
+.hero .lead p{color:var(--mut);font-size:13.5px;margin:0 0 14px;max-width:340px}
+.hero .lead h2{margin:0;font-size:clamp(28px,4.4vw,52px);line-height:1.02;letter-spacing:-.03em}
+.cards-abs{margin-left:auto;display:flex;gap:14px;align-items:flex-end}
+.gcard{background:$CHIP;backdrop-filter:blur(14px);border:1px solid $CHIPB;border-radius:20px;
+  padding:16px 18px;width:216px}
+.gcard b{display:block;font-size:15px;margin-bottom:6px}
+.gcard span{font-size:11.5px;color:var(--mut);line-height:1.4;display:block}
+.gcard.art{padding:0;overflow:hidden;width:236px}
+.gcard.art img{aspect-ratio:16/9;object-fit:cover;width:100%}
+.gcard.art .in{padding:14px 16px 16px}
+
+section.blk{padding:96px 0 0}
+.eyebrow{display:flex;gap:8px;color:var(--mut);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase}
+.two{display:grid;grid-template-columns:270px 1fr;gap:40px;align-items:start}
+.two h3{margin:0;font-size:clamp(21px,2.5vw,31px);line-height:1.22;letter-spacing:-.02em;font-weight:500}
+.two h3 span{color:var(--mut)}
+.two p{color:var(--mut);font-size:13.5px;max-width:62ch;margin:16px 0 0}
+.btn{display:inline-flex;align-items:center;gap:10px;background:$BTNBG;color:$BTNFG;border-radius:999px;
+  padding:11px 11px 11px 22px;font-size:14px;font-weight:500;margin-top:22px}
+.btn b{width:32px;height:32px;border-radius:50%;background:$BTNFG;color:$BTNBG;display:grid;place-items:center}
+
+.stats{display:grid;grid-template-columns:1fr 1.35fr;gap:16px;margin-top:40px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:22px;padding:16px;
+  display:flex;gap:18px;align-items:center}
+.stat img{width:150px;aspect-ratio:4/3;object-fit:cover;border-radius:16px;flex:none}
+.stat .v{font-size:clamp(28px,3.4vw,42px);font-weight:700;letter-spacing:-.03em;line-height:1}
+.stat .k{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);margin-top:6px}
+.stat .d{font-size:12px;color:var(--mut);margin-top:10px;max-width:44ch}
+
+.rot{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:18px;margin-top:34px}
+.tr{background:var(--card);border:1px solid var(--line);border-radius:22px;overflow:hidden;
+  cursor:pointer;transition:border-color .15s}
+.tr:hover{border-color:var(--acc)}
+.tr img{aspect-ratio:16/9;object-fit:cover;width:100%}
+.tr .in{padding:14px 16px 16px}
+.tr b{display:block;font-size:14.5px;font-weight:500;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
+.tr .m{display:flex;justify-content:space-between;color:var(--mut);font-size:11.5px;margin-top:9px}
+.tr .n{display:none}
+
+.player{margin-top:34px;background:var(--panel);border:1px solid var(--line);border-radius:24px;
+  padding:18px;display:flex;gap:20px;align-items:center}
+.player img{width:190px;aspect-ratio:16/9;object-fit:cover;border-radius:16px;flex:none}
+.player .np{flex:1;min-width:0}
+.player small{color:var(--mut);font-size:11px;letter-spacing:.16em;text-transform:uppercase}
+.player h4{margin:7px 0 3px;font-size:19px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.player .ch{color:var(--mut);font-size:13px;margin-bottom:14px}
+.bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+.bar i{display:block;height:100%;width:8%;background:linear-gradient(90deg,var(--acc2),var(--acc))}
+.tm{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:7px}
+.eq{display:flex;gap:3px;align-items:flex-end;height:36px;flex:none}
+.eq b{width:4px;background:var(--acc);border-radius:2px;animation:e 1.1s infinite ease-in-out}
 .eq b:nth-child(2){animation-delay:.15s}.eq b:nth-child(3){animation-delay:.3s}
 .eq b:nth-child(4){animation-delay:.45s}.eq b:nth-child(5){animation-delay:.6s}
-@keyframes eq{0%,100%{height:7px}50%{height:26px}}
-table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0 44px}
-th{font-family:__MONO__;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);
-  text-align:left;font-weight:400;padding:10px 12px;border-bottom:1px solid var(--line)}
+@keyframes e{0%,100%{height:8px}50%{height:34px}}
+
+.steps{background:var(--panel);border-radius:var(--r);padding:60px 0;margin-top:96px}
+.step{display:grid;grid-template-columns:330px 1fr;gap:26px;background:var(--card);
+  border:1px solid var(--line);border-radius:22px;overflow:hidden;margin-top:16px}
+.step img{width:100%;height:100%;object-fit:cover;aspect-ratio:16/10}
+.step .in{padding:26px 28px 28px}
+.step .n{font-size:38px;font-weight:700;letter-spacing:-.03em}
+.step h5{margin:2px 0 12px;font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);font-weight:400}
+.step p{margin:0;color:var(--mut);font-size:13px;max-width:70ch}
+footer{padding:70px 0 46px;color:var(--mut);font-size:12px}
+footer .wrap{display:flex;gap:24px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:26px}
+table{width:100%;border-collapse:collapse;font-size:14px}
 td{padding:12px;border-bottom:1px solid var(--line)}
-tr[data-t]{cursor:pointer}
-tr[data-t]:hover{background:#ffffff08}
-tr[data-t]:hover td:nth-child(2){color:var(--acc)}
-td.num,td.dur{font-family:__MONO__;color:var(--mut);font-size:12px;width:1%;white-space:nowrap}
-h2{font-size:13px;font-family:__MONO__;letter-spacing:.16em;text-transform:uppercase;color:var(--mut);
-  margin:40px 0 12px;font-weight:400}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px;padding-bottom:40px}
-.rel{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card)}
-.rel .art{aspect-ratio:1;background:linear-gradient(135deg,#ffffff12,__ACC__30)}
-.rel .meta{padding:12px}
-.rel .meta b{display:block;font-size:14px;font-weight:500}
-.rel .meta span{font-family:__MONO__;font-size:11px;color:var(--mut)}
-footer{border-top:1px solid var(--line);padding:26px 0 40px;color:var(--mut);
-  font-family:__MONO__;font-size:11.5px;letter-spacing:.06em}
-footer .wrap{display:flex;gap:20px;flex-wrap:wrap}
-p.lead{color:var(--mut);max-width:60ch}
-@media(max-width:600px){nav{display:none}.player .top{flex-wrap:wrap}}
+td.k{color:var(--mut);width:170px;font-size:12px}
+@media(max-width:900px){.two,.stats,.step{grid-template-columns:1fr}.top nav{display:none}
+  .cards-abs{width:100%;margin-left:0}.player{flex-wrap:wrap}}
 CSS
+      cover_html() {
+        cat <<HTML
+<div class="top"><div class="wrap">
+  <a class="brand" href="/"><i></i>$SITE_NAME</a>
+  <nav><a href="/">Radio</a><a href="/#rotation">Rotation</a><a href="/archive/">Archive</a><a href="/about/">About</a></nav>
+  <a class="pill" href="/about/">Submit a mix <b>&#8594;</b></a>
+</div></div>
+<header class="hero">
+  <img class="bg" src="$HERO" alt="">
+  <div class="title"><h1>$SITE_NAME</h1></div>
+  <div class="foot"><div class="wrap">
+    <div class="lead">
+      <p>$TAGLINE. One continuous stream, hand-picked sets, no ads and no accounts.</p>
+      <h2>$HEADLINE</h2>
+    </div>
+    <div class="cards-abs">
+      <div class="gcard"><b>$N_TRACKS SETS</b><span>In current rotation, refreshed every week.</span></div>
+      <div class="gcard art">
+        <img src="https://i.ytimg.com/vi/$F_ID/hqdefault.jpg" alt="">
+        <div class="in"><b>NOW PLAYING</b><span>$F_TIT</span></div>
+      </div>
+    </div>
+  </div></div>
+</header>
+HTML
+      }
+      ;;
+    editorial)
+      GFONTS="Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700"
+      cat > "$WEBROOT/assets/style.css" <<CSS
+:root{--bg:$BG;--panel:$PANEL;--card:$CARD;--line:$LINE;--fg:$FG;--mut:$MUT;--acc:$ACC;--acc2:$ACC2}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);line-height:1.5;
+  font-family:'Inter',system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased;
+  background-image:radial-gradient(#00000009 1px,transparent 1px);background-size:3px 3px}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.wrap{max-width:1180px;margin:0 auto;padding:0 26px}
+.mono{font-family:'Space Mono',ui-monospace,monospace}
 
-  # ---------- скрипт ----------
-  cat > "$WEBROOT/assets/app.js" <<'JS'
-(function () {
-  var bar = document.querySelector('.bar i');
-  var cur = document.querySelector('[data-cur]');
-  var tot = document.querySelector('[data-tot]');
-  var np  = document.querySelector('[data-np]');
-  var pos = 12, len = 214;
+.top .wrap{display:flex;align-items:center;gap:26px;height:74px}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.02em;font-size:14px}
+.brand i{width:16px;height:16px;border-radius:50%;background:var(--acc);display:block}
+.top nav{display:flex;gap:22px;font-size:12.5px;color:var(--mut)}
+.top nav a:hover{color:var(--fg)}
+.pill{margin-left:auto;display:flex;align-items:center;gap:9px;background:$BTNBG;color:$BTNFG;
+  border-radius:999px;padding:8px 8px 8px 18px;font-size:12.5px}
+.pill b{width:26px;height:26px;border-radius:50%;background:$BTNFG;color:$BTNBG;display:grid;
+  place-items:center;font-size:12px}
 
-  function fmt(s) {
-    var m = Math.floor(s / 60), r = Math.floor(s % 60);
-    return m + ':' + (r < 10 ? '0' : '') + r;
-  }
-  if (tot) tot.textContent = fmt(len);
-  setInterval(function () {
-    pos = (pos + 0.35) % 100;
-    if (bar) bar.style.width = pos.toFixed(1) + '%';
-    if (cur) cur.textContent = fmt(len * pos / 100);
-  }, 300);
+/* обложка журнала */
+.cover{position:relative;margin:8px 0 0;padding-bottom:0}
+.cover .meta{display:grid;grid-template-columns:repeat(4,auto);gap:44px;justify-content:start;
+  font-size:11px;letter-spacing:.02em;margin-bottom:-6px;position:relative;z-index:3;padding-left:2px}
+.cover .meta div span{display:block;color:var(--mut);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase}
+.cover .meta div b{font-weight:500;font-size:11.5px}
+.cover h1{margin:0;font-size:clamp(76px,20vw,268px);line-height:.78;letter-spacing:-.055em;
+  font-weight:700;color:var(--acc);position:relative;z-index:1;white-space:nowrap}
+.cover .shot{position:relative;z-index:2;margin:-11% auto 0;width:min(560px,72%);
+  aspect-ratio:3/4;overflow:hidden;border-radius:2px}
+.cover .shot img{width:100%;height:100%;object-fit:cover;filter:saturate(.72) contrast(1.06)}
+.cover .strip{position:absolute;right:26px;bottom:88px;z-index:4;background:#fff;padding:7px 8px;
+  display:flex;gap:2px;align-items:flex-end;height:52px;border:1px solid #00000018}
+.cover .strip i{display:block;width:2px;background:#111}
+.cover .band{position:absolute;left:0;right:0;bottom:0;z-index:3;display:flex;justify-content:space-between;
+  padding:0 26px 18px;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--mut)}
+.sep{height:1px;background:var(--line);margin:34px 0 0}
 
-  document.querySelectorAll('tr[data-t]').forEach(function (row) {
-    row.addEventListener('click', function () {
-      if (np) np.textContent = row.getAttribute('data-t');
-      pos = 0;
-    });
-  });
+section.blk{padding:56px 0 0}
+.eyebrow{color:var(--mut);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase}
+.two{display:grid;grid-template-columns:230px 1fr;gap:34px;align-items:start}
+.two h3{margin:0;font-size:clamp(20px,2.3vw,30px);line-height:1.24;letter-spacing:-.015em;font-weight:500}
+.two h3 span{color:var(--mut)}
+.two p{color:var(--mut);font-size:13px;max-width:62ch;margin:14px 0 0}
+.btn{display:inline-flex;align-items:center;gap:10px;background:$BTNBG;color:$BTNFG;border-radius:999px;
+  padding:10px 10px 10px 20px;font-size:13px;margin-top:20px}
+.btn b{width:28px;height:28px;border-radius:50%;background:$BTNFG;color:$BTNBG;display:grid;place-items:center}
 
-  try {
-    var k = 'listens_' + new Date().toISOString().slice(0, 10);
-    var n = parseInt(localStorage.getItem(k) || '0', 10) + 1;
-    localStorage.setItem(k, String(n));
-    var el = document.querySelector('[data-listens]');
-    if (el) el.textContent = String(n);
-  } catch (e) {}
-})();
-JS
+/* список выпусков */
+.rot{margin-top:30px;border-top:1px solid var(--line)}
+.tr{display:grid;grid-template-columns:34px 108px 1fr auto;gap:20px;align-items:center;
+  padding:13px 4px;border-bottom:1px solid var(--line);cursor:pointer}
+.tr:hover{background:#ffffff70}
+.tr .n{color:var(--mut);font-size:11px}
+.tr img{width:108px;aspect-ratio:16/9;object-fit:cover;border-radius:2px;filter:saturate(.75)}
+.tr b{font-weight:500;font-size:14.5px;display:block}
+.tr .c{color:var(--mut);font-size:12px}
+.tr .l{color:var(--mut);font-size:11.5px}
+.tr:hover b{color:var(--acc)}
 
-  sed -i "s|__BG__|$BG|g; s|__CARD__|$CARD|g; s|__FG__|$FG|g; s|__MUT__|$MUT|g; s|__ACC__|$ACC|g" "$WEBROOT/assets/style.css"
-  sed -i "s|__FAM__|$FAM|g; s|__MONO__|$MONO|g" "$WEBROOT/assets/style.css"
+.player{margin-top:26px;background:var(--card);border:1px solid var(--line);padding:16px;
+  display:flex;gap:18px;align-items:center;border-radius:3px}
+.player img{width:168px;aspect-ratio:16/9;object-fit:cover;border-radius:2px;flex:none}
+.player .np{flex:1;min-width:0}
+.player small{color:var(--mut);font-size:10px;letter-spacing:.18em;text-transform:uppercase}
+.player h4{margin:6px 0 2px;font-size:17px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.player .ch{color:var(--mut);font-size:12.5px;margin-bottom:12px}
+.bar{height:2px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;width:8%;background:var(--acc)}
+.tm{display:flex;justify-content:space-between;color:var(--mut);font-size:10.5px;margin-top:6px}
+.eq{display:flex;gap:3px;align-items:flex-end;height:30px;flex:none}
+.eq b{width:3px;background:var(--acc);border-radius:1px;animation:e 1.1s infinite ease-in-out}
+.eq b:nth-child(2){animation-delay:.15s}.eq b:nth-child(3){animation-delay:.3s}
+.eq b:nth-child(4){animation-delay:.45s}.eq b:nth-child(5){animation-delay:.6s}
+@keyframes e{0%,100%{height:7px}50%{height:28px}}
 
-  cat > "$WEBROOT/favicon.svg" <<SVG
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="$BG"/><rect x="14" y="30" width="6" height="18" rx="3" fill="$ACC"/><rect x="26" y="18" width="6" height="30" rx="3" fill="$ACC"/><rect x="38" y="26" width="6" height="22" rx="3" fill="$ACC"/></svg>
-SVG
+.steps{margin-top:64px}
+.step{display:grid;grid-template-columns:250px 1fr;gap:24px;border-top:1px solid var(--line);padding:24px 0}
+.step img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:2px;filter:saturate(.72)}
+.step .n{font-size:30px;font-weight:700;letter-spacing:-.03em}
+.step h5{margin:2px 0 10px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--mut);font-weight:400}
+.step p{margin:0;color:var(--mut);font-size:12.5px;max-width:68ch}
+footer{padding:56px 0 40px;color:var(--mut);font-size:11.5px}
+footer .wrap{display:flex;gap:22px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:22px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+td{padding:11px 4px;border-bottom:1px solid var(--line)}
+td.k{color:var(--mut);width:160px;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase}
+@media(max-width:860px){.two,.step{grid-template-columns:1fr}.top nav{display:none}
+  .tr{grid-template-columns:26px 84px 1fr}.tr .l{display:none}.cover .strip{display:none}}
+CSS
+      cover_html() {
+        cat <<HTML
+<div class="top"><div class="wrap">
+  <a class="brand" href="/"><i></i>$SITE_NAME</a>
+  <nav><a href="/">Issue</a><a href="/#rotation">Selection</a><a href="/archive/">Archive</a><a href="/about/">About</a></nav>
+  <a class="pill" href="/about/">Submit a tape <b>&#8594;</b></a>
+</div></div>
+<section class="cover"><div class="wrap">
+  <div class="meta">
+    <div><span>Curated by</span><b>$SITE_NAME</b></div>
+    <div><span>Issue</span><b>$(date +%m) / $YEAR</b></div>
+    <div><span>Selection</span><b>$N_TRACKS entries</b></div>
+    <div><span>Runtime</span><b>continuous</b></div>
+  </div>
+  <h1>$SITE_NAME</h1>
+  <div class="shot"><img src="$HERO" alt=""></div>
+  $BARCODE
+  <div class="band"><span>$TAGLINE</span><span>$LABEL</span></div>
+</div></section>
+HTML
+      }
+      ;;
+    split)
+      GFONTS="Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700"
+      cat > "$WEBROOT/assets/style.css" <<CSS
+:root{--bg:$BG;--ink:$FG;--mut:$MUT;--dark:$PANEL;--card:$CARD;--line:$LINE;--acc:$ACC}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);line-height:1.5;
+  font-family:'Inter',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.wrap{max-width:1180px;margin:0 auto;padding:0 34px}
+.mono{font-family:'Space Mono',ui-monospace,monospace}
+.split{display:grid;grid-template-columns:1fr 1fr;min-height:600px}
+.split .l{padding:34px 0 44px;display:flex;flex-direction:column}
+.split .l .in{margin:auto 0;max-width:430px;padding-right:30px}
+.brand{display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:600;line-height:1.15}
+.brand i{width:30px;height:30px;border:1.5px solid var(--ink);display:block;flex:none}
+.brand span{display:block;font-size:8.5px;letter-spacing:.22em;color:var(--mut);font-weight:400}
+h1{font-size:clamp(27px,3.4vw,40px);line-height:1.16;letter-spacing:-.025em;margin:0 0 10px;font-weight:700}
+.sub{color:var(--mut);font-size:12.5px;margin:0 0 26px}
+.ul{font-size:12.5px;border-bottom:1px solid var(--ink);padding-bottom:2px}
+.tabs{display:flex;gap:30px;font-size:11.5px;color:var(--mut);margin-top:auto;padding-top:40px}
+.tabs a:hover{color:var(--ink)}
+.split .r{background:var(--dark);position:relative;overflow:hidden;display:grid;place-items:center}
+.split .r img{width:78%;aspect-ratio:1;object-fit:cover;filter:grayscale(1) contrast(1.1);
+  box-shadow:0 30px 70px #0009}
+.burger{position:absolute;right:26px;top:26px;width:20px;height:11px;
+  border-top:2px solid #fff;border-bottom:2px solid #fff}
+section.blk{padding:96px 0 0}
+h2{font-size:clamp(21px,2.4vw,28px);letter-spacing:-.02em;margin:0 0 12px;font-weight:700}
+.two{display:grid;grid-template-columns:300px 1fr;gap:46px;align-items:start}
+.two p{color:var(--mut);font-size:12px;margin:0;max-width:46ch;line-height:1.65}
+.rot{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:1px;margin-top:26px;
+  background:var(--line)}
+.tr{background:var(--dark);cursor:pointer;padding:0 0 20px;transition:opacity .15s}
+.tr:hover{opacity:.86}
+.tr img{width:100%;aspect-ratio:16/9;object-fit:cover;filter:grayscale(1) contrast(1.05);margin-bottom:16px}
+.tr .in{padding:0 18px}
+.tr b{display:block;color:#fff;font-size:13.5px;font-weight:500;line-height:1.35;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tr .m{display:flex;justify-content:space-between;color:#ffffff70;font-size:10.5px;margin-top:8px}
+.tr .n{display:none}
+.dots{display:flex;gap:4px;margin-top:10px}
+.dots i{width:5px;height:5px;border-radius:50%;background:#ffffff40}
+.dots i:first-child,.dots i:nth-child(2){background:#fff}
+.player{margin-top:36px;border:1px solid var(--line);padding:18px;display:flex;gap:20px;align-items:center}
+.player img{width:180px;aspect-ratio:16/9;object-fit:cover;filter:grayscale(1);flex:none}
+.player .np{flex:1;min-width:0}
+.player small{color:var(--mut);font-size:10px;letter-spacing:.2em;text-transform:uppercase}
+.player h4{margin:7px 0 2px;font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.player .ch{color:var(--mut);font-size:12px;margin-bottom:13px}
+.bar{height:2px;background:var(--line)}
+.bar i{display:block;height:100%;width:8%;background:var(--ink)}
+.tm{display:flex;justify-content:space-between;color:var(--mut);font-size:10.5px;margin-top:6px}
+.eq{display:flex;gap:3px;align-items:flex-end;height:28px;flex:none}
+.eq b{width:3px;background:var(--ink);animation:e 1.1s infinite ease-in-out}
+.eq b:nth-child(2){animation-delay:.15s}.eq b:nth-child(3){animation-delay:.3s}
+.eq b:nth-child(4){animation-delay:.45s}.eq b:nth-child(5){animation-delay:.6s}
+@keyframes e{0%,100%{height:6px}50%{height:26px}}
+.steps{margin-top:80px}
+.step{display:grid;grid-template-columns:1fr 1fr;gap:0;align-items:stretch;margin-top:2px}
+.step img{width:100%;height:100%;object-fit:cover;filter:grayscale(1) contrast(1.05);aspect-ratio:4/3}
+.step .in{background:var(--dark);color:#fff;padding:34px 36px;display:flex;flex-direction:column;justify-content:center}
+.step .n{font-size:12px;color:#ffffff70;letter-spacing:.2em}
+.step h5{margin:10px 0 12px;font-size:22px;font-weight:700;letter-spacing:-.02em}
+.step p{margin:0;color:#ffffff9c;font-size:12px;line-height:1.7}
+.step:nth-child(odd) .in{order:-1}
+footer{padding:70px 0 40px;color:var(--mut);font-size:11px}
+footer .wrap{display:flex;gap:26px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:22px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td{padding:11px 0;border-bottom:1px solid var(--line)}
+td.k{color:var(--mut);width:150px;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.eyebrow{color:var(--mut);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase}
+@media(max-width:860px){.split,.two,.step{grid-template-columns:1fr}.split .r{min-height:340px}}
+CSS
+      cover_html() {
+        cat <<HTML
+<section class="split">
+  <div class="l"><div class="wrap" style="padding-left:34px">
+    <a class="brand" href="/"><i></i><span style="display:block">$SITE_NAME<span>$LABEL</span></span></a>
+  </div>
+  <div class="wrap" style="padding-left:34px"><div class="in">
+    <h1>$HEADLINE</h1>
+    <p class="sub">$TAGLINE</p>
+    <a class="ul" href="/archive/">See the selection</a>
+  </div></div>
+  <div class="wrap" style="padding-left:34px"><div class="tabs">
+    <a href="/">Home</a><a href="/#rotation">Selection</a><a href="/archive/">Archive</a><a href="/about/">About</a>
+  </div></div>
+  </div>
+  <div class="r"><span class="burger"></span><img src="$HERO" alt=""></div>
+</section>
+HTML
+      }
+      ;;
+    halftone)
+      GFONTS="Archivo:wght@400;600;800&family=Space+Mono:wght@400;700"
+      cat > "$WEBROOT/assets/style.css" <<CSS
+:root{--bg:$BG;--ink:$FG;--mut:$MUT;--card:$CARD;--line:$LINE;--acc:$ACC}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);line-height:1.5;font-family:'Archivo',system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;background:var(--bg);
+  background-image:radial-gradient(#00000012 1px,transparent 1.1px),
+                   radial-gradient(#0000000a 1px,transparent 1.1px);
+  background-size:4px 4px,7px 7px;background-position:0 0,2px 3px}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.wrap{max-width:1200px;margin:0 auto;padding:0 30px}
+.mono{font-family:'Space Mono',ui-monospace,monospace}
+.top .wrap{display:flex;align-items:center;gap:26px;height:76px}
+.brand{font-weight:800;letter-spacing:-.02em;font-size:16px}
+.brand sup{font-size:9px;vertical-align:super}
+.top nav{display:flex;gap:24px;font-size:13.5px}
+.top nav a:hover{color:var(--acc)}
+.right{margin-left:auto;display:flex;align-items:center;gap:18px;font-size:13.5px}
+.pill{background:var(--ink);color:var(--bg);border-radius:999px;padding:10px 20px;font-size:13.5px}
+.cover{text-align:center;padding:46px 0 0;position:relative;overflow:hidden}
+.cover h1{margin:0 auto;font-size:clamp(44px,8.4vw,104px);line-height:.98;letter-spacing:-.035em;
+  font-weight:800;max-width:14ch}
+.cover p{color:var(--mut);font-size:15px;max-width:44ch;margin:16px auto 26px}
+.cover .cta{display:inline-flex;align-items:center;gap:10px;background:var(--ink);color:var(--bg);
+  border-radius:999px;padding:14px 26px;font-size:15px}
+.hands{position:relative;margin-top:-6px;height:330px;overflow:hidden}
+.hands img{position:absolute;bottom:-6%;width:52%;aspect-ratio:16/10;object-fit:cover;
+  filter:grayscale(1) contrast(1.5) brightness(1.06);mix-blend-mode:multiply;opacity:.92}
+.hands img:first-child{left:-3%;transform:scaleX(-1)}
+.hands img:last-child{right:-3%}
+.trust{text-align:center;color:var(--mut);font-size:13px;padding:6px 0 14px}
+.logos{display:flex;flex-wrap:wrap;gap:36px;justify-content:center;align-items:center;
+  padding-bottom:60px;font-weight:800;letter-spacing:-.02em;font-size:17px;opacity:.72}
+.logos span:nth-child(even){font-weight:400;font-family:'Space Mono',monospace;font-size:14px}
+section.blk{padding:70px 0 0}
+.eyebrow{color:var(--mut);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase}
+.two{display:grid;grid-template-columns:250px 1fr;gap:40px;align-items:start}
+.two h3{margin:0;font-size:clamp(22px,2.6vw,34px);line-height:1.2;letter-spacing:-.025em;font-weight:800}
+.two h3 span{color:var(--mut);font-weight:400}
+.two p{color:var(--mut);font-size:13.5px;max-width:62ch;margin:14px 0 0}
+.btn{display:inline-flex;align-items:center;gap:10px;background:var(--ink);color:var(--bg);
+  border-radius:999px;padding:12px 22px;font-size:14px;margin-top:20px}
+.rot{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:20px;margin-top:30px}
+.tr{background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden;cursor:pointer}
+.tr:hover{border-color:var(--ink)}
+.tr img{aspect-ratio:16/9;object-fit:cover;width:100%;filter:grayscale(1) contrast(1.35)}
+.tr .in{padding:14px 16px 16px}
+.tr b{display:block;font-size:14px;font-weight:600;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
+.tr .m{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:8px}
+.tr .n{display:none}
+.player{margin-top:30px;background:var(--card);border:1px solid var(--line);border-radius:18px;
+  padding:18px;display:flex;gap:20px;align-items:center}
+.player img{width:180px;aspect-ratio:16/9;object-fit:cover;border-radius:12px;flex:none;filter:grayscale(1) contrast(1.3)}
+.player .np{flex:1;min-width:0}
+.player small{color:var(--mut);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase}
+.player h4{margin:7px 0 2px;font-size:18px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.player .ch{color:var(--mut);font-size:12.5px;margin-bottom:13px}
+.bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+.bar i{display:block;height:100%;width:8%;background:var(--ink)}
+.tm{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:6px}
+.eq{display:flex;gap:3px;align-items:flex-end;height:32px;flex:none}
+.eq b{width:4px;background:var(--ink);border-radius:2px;animation:e 1.1s infinite ease-in-out}
+.eq b:nth-child(2){animation-delay:.15s}.eq b:nth-child(3){animation-delay:.3s}
+.eq b:nth-child(4){animation-delay:.45s}.eq b:nth-child(5){animation-delay:.6s}
+@keyframes e{0%,100%{height:8px}50%{height:30px}}
+.steps{margin-top:74px}
+.step{display:grid;grid-template-columns:290px 1fr;gap:26px;border-top:1px solid var(--line);padding:26px 0}
+.step img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:12px;filter:grayscale(1) contrast(1.3)}
+.step .n{font-size:30px;font-weight:800;letter-spacing:-.03em}
+.step h5{margin:2px 0 10px;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--mut);font-weight:400}
+.step p{margin:0;color:var(--mut);font-size:13px;max-width:66ch}
+footer{padding:60px 0 40px;color:var(--mut);font-size:12px}
+footer .wrap{display:flex;gap:24px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:22px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+td{padding:11px 0;border-bottom:1px solid var(--line)}
+td.k{color:var(--mut);width:150px;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+@media(max-width:860px){.two,.step{grid-template-columns:1fr}.top nav{display:none}.hands{height:200px}}
+CSS
+      cover_html() {
+        cat <<HTML
+<div class="top"><div class="wrap">
+  <a class="brand" href="/">$SITE_NAME<sup>&#169;</sup></a>
+  <nav><a href="/#rotation">Selection</a><a href="/archive/">Archive</a><a href="/about/">About</a></nav>
+  <div class="right"><a href="/about/">Contact</a><a class="pill" href="/archive/">Start now</a></div>
+</div></div>
+<section class="cover">
+  <div class="wrap">
+    <h1>$HEADLINE</h1>
+    <p>$TAGLINE</p>
+    <a class="cta" href="/#rotation">Open the selection &#8599;</a>
+  </div>
+  <div class="hands"><img src="$HERO" alt=""><img src="https://i.ytimg.com/vi/$T2/hqdefault.jpg" alt=""></div>
+  <div class="trust">$TRUST</div>
+  <div class="logos">$LOGOS_HTML</div>
+</section>
+HTML
+      }
+      ;;
+    character)
+      GFONTS="Archivo:wght@400;700;800&family=Caveat:wght@600&family=Space+Mono"
+      cat > "$WEBROOT/assets/style.css" <<CSS
+:root{--bg:$BG;--ink:$FG;--mut:$MUT;--card:$CARD;--line:$LINE;--acc:$ACC;--acc2:$ACC2}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);line-height:1.5;font-family:'Archivo',system-ui,sans-serif;
+  background:var(--bg);-webkit-font-smoothing:antialiased;
+  background-image:linear-gradient(115deg,#00000008 0 6%,transparent 6% 13%,#00000008 13% 17%,transparent 17% 27%),
+                   linear-gradient(200deg,#00000008 0 8%,transparent 8% 19%,#0000000a 19% 23%,transparent 23% 33%)}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.wrap{max-width:1180px;margin:0 auto;padding:0 30px}
+.mono{font-family:'Space Mono',ui-monospace,monospace}
+.top .wrap{display:flex;align-items:center;gap:14px;height:74px;font-size:12.5px;font-weight:700;letter-spacing:.06em}
+.top nav{display:flex;gap:12px;align-items:center}
+.top nav a{padding:7px 15px;border-radius:999px}
+.top nav a.on{background:var(--ink);color:var(--bg)}
+.top .sep{width:1px;height:18px;background:var(--line);margin:0 6px}
+.top .info{margin-left:auto;display:flex;align-items:center;gap:8px}
+.top .info i{width:16px;height:16px;border-radius:50%;background:var(--ink);color:var(--bg);
+  display:grid;place-items:center;font-size:10px;font-style:normal}
+.cover{position:relative;min-height:560px;overflow:hidden}
+.cover .ghost{position:absolute;right:6%;top:2%;font-size:clamp(90px,15vw,190px);font-weight:800;
+  color:#00000010;letter-spacing:-.04em;line-height:.9;writing-mode:vertical-rl;text-orientation:mixed}
+.cover .in{position:relative;z-index:2;max-width:560px;padding:56px 0 40px}
+.cover h1{margin:0 0 16px;font-size:clamp(46px,7.6vw,96px);line-height:.92;letter-spacing:-.035em;font-weight:800}
+.cover .d{font-size:13.5px;font-weight:700;margin-bottom:14px;max-width:40ch}
+.cover p{color:var(--mut);font-size:13px;max-width:46ch;margin:0 0 18px}
+.cover .link{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--mut)}
+.cover .link img{width:34px;height:22px;object-fit:cover;border-radius:3px}
+.sign{font-family:'Caveat',cursive;font-size:44px;margin:6px 0 24px;line-height:1}
+.cbtns{display:flex;gap:12px}
+.cbtns a{border:1.5px solid var(--ink);border-radius:999px;padding:10px 20px;font-size:12px;font-weight:700}
+.cbtns a:first-child{background:var(--ink);color:var(--bg)}
+.hero-img{position:absolute;right:0;bottom:0;top:0;width:46%;z-index:1;
+  clip-path:polygon(18% 0,100% 0,100% 100%,0 100%)}
+.hero-img img{width:100%;height:100%;object-fit:cover;filter:saturate(1.05)}
+.rail{position:absolute;right:26px;top:52%;transform:translateY(-50%);z-index:3;display:flex;
+  flex-direction:column;gap:11px}
+.rail i{width:8px;height:8px;border-radius:50%;background:var(--ink);opacity:.35}
+.rail i:first-child{opacity:1}
+section.blk{padding:74px 0 0}
+.eyebrow{color:var(--mut);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase}
+.two{display:grid;grid-template-columns:230px 1fr;gap:36px;align-items:start}
+.two h3{margin:0;font-size:clamp(21px,2.5vw,31px);line-height:1.2;letter-spacing:-.025em;font-weight:800}
+.two h3 span{color:var(--mut);font-weight:400}
+.two p{color:var(--mut);font-size:13px;max-width:62ch;margin:14px 0 0}
+.btn{display:inline-flex;align-items:center;gap:9px;background:var(--ink);color:var(--bg);
+  border-radius:999px;padding:11px 20px;font-size:13px;margin-top:18px;font-weight:700}
+.rot{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px;margin-top:28px}
+.tr{background:var(--card);border:1.5px solid var(--ink);border-radius:18px;overflow:hidden;cursor:pointer;
+  box-shadow:5px 5px 0 var(--ink)}
+.tr:hover{transform:translate(-2px,-2px);box-shadow:7px 7px 0 var(--acc)}
+.tr img{aspect-ratio:16/9;object-fit:cover;width:100%}
+.tr .in{padding:13px 15px 15px}
+.tr b{display:block;font-size:13.5px;font-weight:700;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
+.tr .m{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:8px}
+.tr .n{display:none}
+.player{margin-top:28px;background:var(--card);border:1.5px solid var(--ink);border-radius:18px;
+  padding:16px;display:flex;gap:18px;align-items:center;box-shadow:5px 5px 0 var(--ink)}
+.player img{width:170px;aspect-ratio:16/9;object-fit:cover;border-radius:11px;flex:none}
+.player .np{flex:1;min-width:0}
+.player small{color:var(--mut);font-size:10px;letter-spacing:.18em;text-transform:uppercase}
+.player h4{margin:6px 0 2px;font-size:17px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.player .ch{color:var(--mut);font-size:12.5px;margin-bottom:12px}
+.bar{height:6px;background:var(--bg);border:1.5px solid var(--ink);border-radius:4px;overflow:hidden}
+.bar i{display:block;height:100%;width:8%;background:var(--acc)}
+.tm{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:6px}
+.eq{display:flex;gap:3px;align-items:flex-end;height:30px;flex:none}
+.eq b{width:4px;background:var(--ink);border-radius:2px;animation:e 1.1s infinite ease-in-out}
+.eq b:nth-child(2){animation-delay:.15s}.eq b:nth-child(3){animation-delay:.3s}
+.eq b:nth-child(4){animation-delay:.45s}.eq b:nth-child(5){animation-delay:.6s}
+@keyframes e{0%,100%{height:7px}50%{height:28px}}
+.steps{margin-top:70px}
+.step{display:grid;grid-template-columns:270px 1fr;gap:24px;padding:22px 0;border-top:2px solid var(--ink)}
+.step img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:14px;border:1.5px solid var(--ink)}
+.step .n{font-size:30px;font-weight:800}
+.step h5{margin:2px 0 10px;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--mut);font-weight:400}
+.step p{margin:0;color:var(--mut);font-size:12.5px;max-width:66ch}
+footer{padding:56px 0 36px;color:var(--mut);font-size:11.5px}
+footer .wrap{display:flex;gap:22px;flex-wrap:wrap;border-top:2px solid var(--ink);padding-top:20px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+td{padding:11px 0;border-bottom:1px solid var(--line)}
+td.k{color:var(--mut);width:150px;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+@media(max-width:900px){.hero-img{display:none}.two,.step{grid-template-columns:1fr}.top nav{display:none}}
+CSS
+      cover_html() {
+        cat <<HTML
+<div class="top"><div class="wrap">
+  <nav><a href="/">HOME</a><a href="/#rotation">MENU</a><a class="on" href="/archive/">ARCHIVE</a><a href="/about/">ABOUT</a></nav>
+  <span class="sep"></span>
+  <div class="info">INFO <i>i</i></div>
+</div></div>
+<section class="cover"><div class="wrap">
+  <div class="ghost">$SITE_NAME</div>
+  <div class="hero-img"><img src="$HERO" alt=""></div>
+  <div class="in">
+    <h1>$SITE_NAME</h1>
+    <div class="d">$HEADLINE</div>
+    <p>$TAGLINE — hand-picked sessions, one continuous stream and an archive that stays online.</p>
+    <div class="link"><img src="https://i.ytimg.com/vi/$T2/hqdefault.jpg" alt="">$LABEL</div>
+    <div class="sign">$SITE_NAME</div>
+    <div class="cbtns"><a href="/#rotation">LISTEN NOW</a><a href="/archive/">OPEN ARCHIVE</a></div>
+  </div>
+  <div class="rail"><i></i><i></i><i></i><i></i><i></i></div>
+</div></section>
+HTML
+      }
+      ;;
+    cinema)
+      GFONTS="Playfair+Display:wght@400;500&family=Inter:wght@400;500&family=Space+Mono"
+      cat > "$WEBROOT/assets/style.css" <<CSS
+:root{--bg:$BG;--ink:$FG;--mut:$MUT;--card:$CARD;--line:$LINE;--acc:$ACC;--panel:$PANEL}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);line-height:1.55;font-family:'Inter',system-ui,sans-serif;
+  background:var(--bg);-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.wrap{max-width:1180px;margin:0 auto;padding:0 32px}
+.mono{font-family:'Space Mono',ui-monospace,monospace}
+.frame{position:relative;min-height:600px;overflow:hidden;isolation:isolate}
+.frame .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:-2;filter:saturate(.9)}
+.frame::after{content:"";position:absolute;inset:0;z-index:-1;
+  background:linear-gradient(96deg,$PANEL 0 46%,transparent 62%)}
+.top{position:relative;z-index:3}
+.top .wrap{display:flex;align-items:center;gap:24px;height:70px;font-size:13px}
+.top nav{display:flex;gap:22px}
+.top nav a.on{border-bottom:1.5px solid var(--ink)}
+.burger{margin-left:auto;width:22px;height:12px;border-top:2px solid var(--ink);border-bottom:2px solid var(--ink)}
+.cover{position:relative;z-index:2;padding:36px 0 56px}
+.cover .yr{font-family:'Playfair Display',Georgia,serif;font-size:19px;letter-spacing:.02em;margin-bottom:6px}
+.cover h1{font-family:'Playfair Display',Georgia,serif;margin:0;font-weight:500;
+  font-size:clamp(52px,8.6vw,104px);line-height:.92;letter-spacing:-.01em;max-width:9ch}
+.cover .btns{display:flex;align-items:center;gap:22px;margin-top:34px}
+.cover .btns a:first-child{background:var(--ink);color:var(--bg);padding:13px 26px;font-size:13px;
+  display:inline-flex;align-items:center;gap:9px;font-weight:500}
+.cover .btns a:last-child{font-size:13px}
+.side{position:absolute;right:32px;top:44%;transform:translateY(-50%);max-width:310px;z-index:3;
+  font-size:12.5px;color:var(--ink)}
+.side p{margin:0 0 12px;line-height:1.62}
+.side b{font-size:12.5px}
+.pager{position:absolute;left:0;right:0;bottom:20px;z-index:3;display:flex;justify-content:space-between;
+  align-items:center;font-size:13px}
+.pager .wrap{display:flex;justify-content:space-between;width:100%}
+.pager a{display:inline-flex;align-items:center;gap:11px}
+.pager i{width:32px;height:32px;border-radius:50%;border:1.5px solid var(--ink);display:grid;
+  place-items:center;font-style:normal;font-size:13px}
+section.blk{padding:78px 0 0}
+.eyebrow{color:var(--mut);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase}
+.two{display:grid;grid-template-columns:240px 1fr;gap:38px;align-items:start}
+.two h3{margin:0;font-family:'Playfair Display',Georgia,serif;font-weight:500;
+  font-size:clamp(22px,2.7vw,34px);line-height:1.22}
+.two h3 span{color:var(--mut)}
+.two p{color:var(--mut);font-size:13px;max-width:62ch;margin:14px 0 0}
+.btn{display:inline-flex;align-items:center;gap:9px;background:var(--ink);color:var(--bg);
+  padding:12px 22px;font-size:13px;margin-top:18px}
+.rot{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px;margin-top:28px}
+.tr{cursor:pointer}
+.tr img{aspect-ratio:2/3;object-fit:cover;width:100%;box-shadow:0 12px 32px #0000001f}
+.tr .in{padding:12px 2px 0}
+.tr b{display:block;font-family:'Playfair Display',Georgia,serif;font-size:16px;font-weight:500;line-height:1.25;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.5em}
+.tr .m{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:6px}
+.tr .n{display:none}
+.tr:hover b{color:var(--acc)}
+.player{margin-top:30px;background:var(--card);padding:18px;display:flex;gap:20px;align-items:center;
+  border:1px solid var(--line)}
+.player img{width:126px;aspect-ratio:2/3;object-fit:cover;flex:none}
+.player .np{flex:1;min-width:0}
+.player small{color:var(--mut);font-size:10px;letter-spacing:.2em;text-transform:uppercase}
+.player h4{margin:7px 0 2px;font-family:'Playfair Display',Georgia,serif;font-size:20px;font-weight:500;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.player .ch{color:var(--mut);font-size:12.5px;margin-bottom:13px}
+.bar{height:2px;background:var(--line)}
+.bar i{display:block;height:100%;width:8%;background:var(--acc)}
+.tm{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;margin-top:6px}
+.eq{display:flex;gap:3px;align-items:flex-end;height:30px;flex:none}
+.eq b{width:3px;background:var(--acc);animation:e 1.1s infinite ease-in-out}
+.eq b:nth-child(2){animation-delay:.15s}.eq b:nth-child(3){animation-delay:.3s}
+.eq b:nth-child(4){animation-delay:.45s}.eq b:nth-child(5){animation-delay:.6s}
+@keyframes e{0%,100%{height:7px}50%{height:28px}}
+.steps{margin-top:74px}
+.step{display:grid;grid-template-columns:280px 1fr;gap:26px;padding:24px 0;border-top:1px solid var(--line)}
+.step img{width:100%;aspect-ratio:16/10;object-fit:cover}
+.step .n{font-family:'Playfair Display',Georgia,serif;font-size:32px}
+.step h5{margin:2px 0 10px;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--mut);font-weight:400}
+.step p{margin:0;color:var(--mut);font-size:12.5px;max-width:66ch}
+footer{padding:60px 0 40px;color:var(--mut);font-size:11.5px}
+footer .wrap{display:flex;gap:22px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:22px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+td{padding:11px 0;border-bottom:1px solid var(--line)}
+td.k{color:var(--mut);width:150px;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+@media(max-width:900px){.side{position:static;max-width:none;margin-top:26px}
+  .two,.step{grid-template-columns:1fr}.top nav{display:none}}
+CSS
+      cover_html() {
+        cat <<HTML
+<section class="frame">
+  <img class="bg" src="$HERO" alt="">
+  <div class="top"><div class="wrap">
+    <nav><a href="/about/">About</a><a class="on" href="/#rotation">Selection</a><a href="/archive/">Archive</a></nav>
+    <span class="burger"></span>
+  </div></div>
+  <div class="cover"><div class="wrap">
+    <div class="yr">$YEAR</div>
+    <h1>$SITE_NAME</h1>
+    <div class="btns"><a href="/#rotation">&#9654; START THE STREAM</a><a href="/archive/">ARCHIVE</a></div>
+  </div></div>
+  <div class="side">
+    <p>$TAGLINE. $HEADLINE</p>
+    <p><b>Now playing:</b> $F_TIT</p>
+  </div>
+  <div class="pager"><div class="wrap">
+    <a href="/archive/"><i>&#8592;</i> $PREV</a>
+    <a href="/#rotation">$NEXT <i>&#8594;</i></a>
+  </div></div>
+</section>
+HTML
+      }
+      ;;
+  esac
 
-  # ---------- общие куски страниц ----------
   head_html() {
     cat <<HTML
 <!doctype html>
@@ -1169,138 +2049,204 @@ SVG
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>$1 — $SITE_NAME</title>
 <meta name="description" content="$SITE_NAME — $TAGLINE">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=$GFONT&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=$GFONTS&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/style.css">
 </head><body>
-<header><div class="wrap">
-  <a class="logo" href="/">$SITE_NAME</a>
-  <span class="live"><i></i>STREAM ONLINE</span>
-  <nav><a href="/">radio</a><a href="/archive/">archive</a><a href="/about/">about</a></nav>
-</div></header>
 HTML
   }
   foot_html() {
     cat <<HTML
 <footer><div class="wrap">
-  <span>$SITE_NAME · $GENRE</span>
-  <span>listens today: <b data-listens>1</b></span>
-  <span>since $((YEAR-4))</span>
+  <span>© $YEAR $SITE_NAME</span>
+  <span class="mono">$LABEL</span>
+  <span class="mono">listens today: <b data-listens>1</b></span>
+  <span class="mono">since $((YEAR-4))</span>
 </div></footer>
 <script src="/assets/app.js"></script>
 </body></html>
 HTML
   }
+  cards_html() {
+    n=0
+    printf '%s\n' "$TRACKS" | while IFS='|' read -r id title chan len; do
+      [ -z "$id" ] && continue
+      n=$((n+1))
+      printf '  <article class="tr" data-t="%s" data-c="%s" data-l="%s">' "$title" "$chan" "$len"
+      printf '<span class="n">%02d</span>' "$n"
+      printf '<img src="https://i.ytimg.com/vi/%s/hqdefault.jpg" alt="" loading="lazy">' "$id"
+      printf '<div class="in"><b>%s</b><div class="m"><span class="c">%s</span><span class="mono l">%s</span></div>' "$title" "$chan" "$len"
+      printf '<div class="dots"><i></i><i></i><i></i><i></i></div></div></article>\n'
+    done
+  }
 
-  # ---------- главная ----------
-  FIRST="$(printf '%s\n' "$TRACKS" | head -1)"
+  cat > "$WEBROOT/assets/app.js" <<'JS'
+(function () {
+  var bar = document.querySelector('.bar i'), cur = document.querySelector('[data-cur]');
+  var tot = document.querySelector('[data-tot]'), ttl = document.querySelector('[data-np]');
+  var ch = document.querySelector('[data-ch]'), art = document.querySelector('[data-art]');
+  var pos = 8, len = 3600;
+  function secs(t) {
+    var p = t.split(':').map(Number);
+    return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + (p[1] || 0);
+  }
+  function fmt(s) {
+    var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = Math.floor(s % 60);
+    return (h ? h + ':' : '') + ((m < 10 && h ? '0' : '') + m) + ':' + ((r < 10 ? '0' : '') + r);
+  }
+  if (tot) len = secs(tot.textContent);
+  setInterval(function () {
+    pos = (pos + 0.08) % 100;
+    if (bar) bar.style.width = pos.toFixed(2) + '%';
+    if (cur) cur.textContent = fmt(len * pos / 100);
+  }, 500);
+  document.querySelectorAll('.tr').forEach(function (c) {
+    c.addEventListener('click', function () {
+      if (ttl) ttl.textContent = c.getAttribute('data-t');
+      if (ch) ch.textContent = c.getAttribute('data-c');
+      if (art) art.src = c.querySelector('img').src;
+      if (tot) { tot.textContent = c.getAttribute('data-l'); len = secs(tot.textContent); }
+      pos = 0;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  });
+  try {
+    var k = 'l_' + new Date().toISOString().slice(0, 10);
+    var n = parseInt(localStorage.getItem(k) || '0', 10) + 1;
+    localStorage.setItem(k, String(n));
+    var el = document.querySelector('[data-listens]');
+    if (el) el.textContent = n.toLocaleString('en-US');
+  } catch (e) {}
+})();
+JS
+
+  player_html() {
+    cat <<HTML
+  <div class="player">
+    <img src="https://i.ytimg.com/vi/$F_ID/hqdefault.jpg" alt="" data-art>
+    <div class="np">
+      <small>now playing</small>
+      <h4 data-np>$F_TIT</h4>
+      <div class="ch" data-ch>$F_CH</div>
+      <div class="bar"><i></i></div>
+      <div class="tm"><span data-cur>0:00</span><span data-tot>$F_LEN</span></div>
+    </div>
+    <div class="eq" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b></div>
+  </div>
+HTML
+  }
+
   {
     head_html "$TAGLINE"
+    cover_html
     cat <<HTML
-<section class="hero"><div class="wrap">
-  <h1>$SITE_NAME</h1>
-  <p>$TAGLINE — 24/7</p>
-  <div class="player">
-    <div class="top">
-      <div class="cover"><span>$GENRE</span></div>
-      <div class="np">
-        <small>now playing</small>
-        <h3 data-np>$FIRST</h3>
-        <div class="bar"><i></i></div>
-        <div class="time"><span data-cur>0:24</span><span data-tot>3:34</span></div>
-      </div>
-      <div class="eq" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b></div>
+<section class="blk"><div class="wrap">
+  <div class="two">
+    <div class="eyebrow">◆ WHAT THIS IS</div>
+    <div>
+      <h3>A small room for $LABEL. <span>Long-form only, picked by hand and left to run.</span></h3>
+      <p>No recommendations, no autoplay traps, no sign-up. The selection below is what is on air right now; everything that aired before stays in the archive.</p>
+      <a class="btn" href="/archive/">Open archive <b>&#8594;</b></a>
     </div>
   </div>
-</div></section>
-<div class="wrap">
-  <h2>tracklist</h2>
-  <table>
-    <tr><th>#</th><th>title</th><th>plays</th><th>length</th></tr>
 HTML
-    n=0
-    printf '%s\n' "$TRACKS" | while IFS= read -r t; do
-      [ -z "$t" ] && continue
-      n=$((n+1))
-      mm=$(( (RANDOM % 5) + 2 )); ss=$(( RANDOM % 60 ))
-      plays=$(( (RANDOM % 90) + 10 ))
-      printf '    <tr data-t="%s"><td class="num">%02d</td><td>%s</td><td class="dur">%s.%dk</td><td class="dur">%d:%02d</td></tr>\n' \
-        "$t" "$n" "$t" "$plays" "$((RANDOM % 9))" "$mm" "$ss"
-    done
+    player_html
     cat <<HTML
-  </table>
-  <h2>latest releases</h2>
-  <div class="grid">
+</div></section>
+
+<section class="blk" id="rotation"><div class="wrap">
+  <div class="two">
+    <div class="eyebrow">◆ CURRENT SELECTION</div>
+    <div><h3>Everything on air this week. <span>Click an entry to move it to the player.</span></h3></div>
+  </div>
+  <div class="rot">
 HTML
-    for i in 1 2 3 4; do
-      printf '    <div class="rel"><div class="art"></div><div class="meta"><b>%s vol.%d</b><span>%s · %d tracks</span></div></div>\n' \
-        "$SITE_NAME" "$i" "$((YEAR - i + 1))" "$(( (RANDOM % 8) + 5 ))"
-    done
+    cards_html
     cat <<HTML
   </div>
-</div>
+</div></section>
+
+<section class="steps"><div class="wrap">
+  <div class="two">
+    <div class="eyebrow">◆ HOW IT GETS ON AIR</div>
+    <div><h3>Three steps, no algorithm. <span>Anyone can send something in; we go through all of it.</span></h3></div>
+  </div>
+  <div class="step">
+    <img src="https://i.ytimg.com/vi/$F_ID/hqdefault.jpg" alt="">
+    <div class="in"><div class="n">01</div><h5>You send a link</h5>
+    <p>Anything long enough to sit with. Nothing is filtered by view count.</p></div>
+  </div>
+  <div class="step">
+    <img src="https://i.ytimg.com/vi/$T2/hqdefault.jpg" alt="">
+    <div class="in"><div class="n">02</div><h5>We go through it end to end</h5>
+    <p>Every submission gets played in full. If it fits the room, it joins the queue.</p></div>
+  </div>
+  <div class="step">
+    <img src="https://i.ytimg.com/vi/$T3/hqdefault.jpg" alt="">
+    <div class="in"><div class="n">03</div><h5>It goes on air</h5>
+    <p>It joins the stream and stays in the archive afterwards, credit intact.</p></div>
+  </div>
+</div></section>
 HTML
     foot_html
   } > "$WEBROOT/index.html"
 
-  # ---------- архив ----------
   {
-    head_html "archive"
+    head_html "archive"; cover_html
     cat <<HTML
-<div class="wrap">
-  <h2>archive</h2>
-  <p class="lead">Everything that aired on the stream, oldest sessions first. Rips are mirrored twice a week.</p>
-  <table>
-    <tr><th>#</th><th>session</th><th>date</th><th>length</th></tr>
+<section class="blk"><div class="wrap">
+  <div class="two">
+    <div class="eyebrow">◆ ARCHIVE</div>
+    <div><h3>Everything that aired. <span>Older entries are kept exactly as they were.</span></h3></div>
+  </div>
+  <div class="rot">
 HTML
-    n=0
-    printf '%s\n' "$TRACKS" | while IFS= read -r t; do
-      [ -z "$t" ] && continue
-      n=$((n+1))
-      printf '    <tr><td class="num">%02d</td><td>%s</td><td class="dur">%02d.%02d.%s</td><td class="dur">%d:%02d</td></tr>\n' \
-        "$n" "$t" "$(( (RANDOM % 28) + 1 ))" "$(( (RANDOM % 12) + 1 ))" "$YEAR" "$(( (RANDOM % 5) + 2 ))" "$(( RANDOM % 60 ))"
-    done
+    cards_html
     cat <<HTML
-  </table>
-</div>
+  </div>
+</div></section>
 HTML
     foot_html
   } > "$WEBROOT/archive/index.html"
 
-  # ---------- about ----------
   {
-    head_html "about"
+    head_html "about"; cover_html
     cat <<HTML
-<div class="wrap">
-  <h2>about</h2>
-  <p class="lead">$SITE_NAME is a small independent stream focused on $GENRE. No ads, no accounts,
-  no algorithm — just a running playlist and an archive of past sessions.</p>
-  <p class="lead">Submissions are open. Send a link to your mix, we listen to everything and reply
-  when it fits the rotation.</p>
-  <h2>contact</h2>
-  <table>
-    <tr><td>demos</td><td class="dur">demo@$DOMAIN</td></tr>
-    <tr><td>general</td><td class="dur">hi@$DOMAIN</td></tr>
-  </table>
-</div>
+<section class="blk"><div class="wrap">
+  <div class="two">
+    <div class="eyebrow">◆ ABOUT</div>
+    <div>
+      <h3>Started as a folder of links. <span>Now it runs on its own and nobody deletes the archive.</span></h3>
+      <p>$SITE_NAME is about $LABEL. No ads, no accounts, no recommendations. Credit stays with the people who made the work.</p>
+    </div>
+  </div>
+  <div class="two" style="margin-top:56px">
+    <div class="eyebrow">◆ CONTACT</div>
+    <div><table>
+      <tr><td class="k">submissions</td><td>demo@$DOMAIN</td></tr>
+      <tr><td class="k">general</td><td>hi@$DOMAIN</td></tr>
+      <tr><td class="k">selection</td><td>updated weekly</td></tr>
+    </table></div>
+  </div>
+</div></section>
 HTML
     foot_html
   } > "$WEBROOT/about/index.html"
 
+  cat > "$WEBROOT/favicon.svg" <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="$BG"/><circle cx="32" cy="32" r="13" fill="$ACC"/></svg>
+SVG
   printf 'User-agent: *\nAllow: /\nDisallow: /admin/\nSitemap: https://%s/sitemap.xml\n' "$DOMAIN" > "$WEBROOT/robots.txt"
   {
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-    for u in "/" "/archive/" "/about/"; do
-      printf '  <url><loc>https://%s%s</loc></url>\n' "$DOMAIN" "$u"
-    done
+    for u in "/" "/archive/" "/about/"; do printf '  <url><loc>https://%s%s</loc></url>\n' "$DOMAIN" "$u"; done
     printf '%s\n' '</urlset>'
   } > "$WEBROOT/sitemap.xml"
 
   chown -R root:root "$WEBROOT" 2>/dev/null; chmod -R a+rX "$WEBROOT" 2>/dev/null
-  SITE_THEME="$STYLE"
-  ok "сайт «$SITE_NAME» ($STYLE) собран: радио, /archive/, /about/, robots, sitemap"
+  SITE_THEME="$PRESET"
+  ok "сайт «$SITE_NAME» ($PRESET: $LAYOUT / $TOPIC) собран: $N_TRACKS записей с обложками"
 fi
 
 # =============================================================================
