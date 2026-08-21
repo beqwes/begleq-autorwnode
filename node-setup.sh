@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="4.2"
+VERSION="4.3"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -332,16 +332,37 @@ menu_main() {
 
 # ставит команду begleq, чтобы меню открывалось откуда угодно
 install_cli() {
+  RAW_URL="https://raw.githubusercontent.com/beqwes/begleq-autorwnode/main/node-setup.sh"
+  mkdir -p "$INSTALL_DIR"
+
+  # при запуске через curl | bash в $0 лежит пайп, копировать нечего —
+  # тогда тянем свежую копию с гитхаба, иначе команда останется битой
+  SELF_PATH="$(readlink -f "$0" 2>/dev/null)"
+  DEST_PATH="$(readlink -f "$INSTALL_DIR/node-setup.sh" 2>/dev/null)"
+  if [ -f "$0" ] && [ -r "$0" ] && [ "$SELF_PATH" != "$DEST_PATH" ]; then
+    cp -f "$0" "$INSTALL_DIR/node-setup.sh" 2>/dev/null
+  fi
+  if [ ! -s "$INSTALL_DIR/node-setup.sh" ]; then
+    if curl -fsSL --max-time 60 "$RAW_URL" -o "$INSTALL_DIR/node-setup.sh" 2>/dev/null; then
+      ok "скрипт скачан в $INSTALL_DIR/node-setup.sh"
+    else
+      warn "не смог положить скрипт в $INSTALL_DIR — begleq скачает его при первом запуске"
+    fi
+  fi
+
+  # обёртка чинит себя сама: нет файла — качает и продолжает
   cat > /usr/local/bin/begleq <<CLI
 #!/bin/sh
 # Меню настройки ноды. Поставлено node-setup.sh
-exec bash $INSTALL_DIR/node-setup.sh --menu "\$@"
+S="$INSTALL_DIR/node-setup.sh"
+if [ ! -s "\$S" ]; then
+  echo "скрипт не найден, качаю с гитхаба…"
+  mkdir -p "$INSTALL_DIR"
+  curl -fsSL --max-time 60 "$RAW_URL" -o "\$S" || { echo "не смог скачать \$S"; exit 1; }
+fi
+exec bash "\$S" --menu "\$@"
 CLI
   chmod +x /usr/local/bin/begleq
-  # сам скрипт должен лежать там, откуда его зовёт команда
-  if [ -f "$0" ] && [ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "$INSTALL_DIR/node-setup.sh" 2>/dev/null)" ]; then
-    cp -f "$0" "$INSTALL_DIR/node-setup.sh" 2>/dev/null
-  fi
   ok "команда begleq поставлена — открывает меню настроек"
 }
 
