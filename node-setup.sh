@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="4.3"
+VERSION="4.4"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -868,6 +868,17 @@ if [ -d /etc/letsencrypt/live ]; then
   done
 fi
 
+  # мало знать срок — важно, продлится ли он сам
+  if [ -d /etc/letsencrypt/renewal ]; then
+    R_TIMER="$(systemctl is-active certbot.timer 2>/dev/null)"
+    R_AUTH="$(grep -hm1 "^authenticator" /etc/letsencrypt/renewal/*.conf 2>/dev/null | sed "s/.*= *//")"
+    if [ "$R_TIMER" = "active" ] || [ -f /etc/cron.d/certbot ]; then
+      ok "автопродление: способ ${R_AUTH:-?}, таймер ${R_TIMER:-cron пакета}"
+    else
+      err "автопродление не настроено — сертификат протухнет (способ ${R_AUTH:-?})"
+    fi
+  fi
+
 # =============================================================================
 step "Службы"
 # =============================================================================
@@ -1282,6 +1293,19 @@ if [ "$DO_NGINX" = "1" ]; then
 docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1 || true
 HOOK
   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-remnawave-nginx.sh
+
+  # автопродление обычно включает сам пакет certbot, но на части систем таймер
+  # приходит выключенным — тогда сертификат тихо протухнет через три месяца
+  if systemctl list-unit-files --no-pager 2>/dev/null | grep -q "^certbot.timer"; then
+    systemctl enable --now certbot.timer >/dev/null 2>&1
+    CB_NEXT="$(systemctl list-timers certbot.timer --no-pager 2>/dev/null | awk 'NR==2{print $1" "$2" "$3}')"
+    ok "автопродление включено (certbot.timer), ближайшая проверка: ${CB_NEXT:-по расписанию}"
+  elif [ -f /etc/cron.d/certbot ]; then
+    ok "автопродление через cron пакета certbot"
+  else
+    err "автопродления нет: ни certbot.timer, ни /etc/cron.d/certbot"
+    say "      сертификат протухнет через 90 дней — переустанови пакет certbot"
+  fi
 fi
 
 # =============================================================================
@@ -2937,6 +2961,16 @@ if [ "$DO_NGINX" = "1" ]; then
     else
       ok "продление уже настроено без standalone"
     fi
+  fi
+
+  # видно ли, что сертификат продлится сам
+  RC="/etc/letsencrypt/renewal/$DOMAIN.conf"
+  R_AUTH="$(grep -m1 "^authenticator" "$RC" 2>/dev/null | sed "s/.*= *//")"
+  R_TIMER="$(systemctl is-active certbot.timer 2>/dev/null)"
+  if [ "$R_TIMER" = "active" ] || [ -f /etc/cron.d/certbot ]; then
+    ok "автопродление сертификата: способ ${R_AUTH:-?}, таймер ${R_TIMER:-cron}"
+  else
+    err "автопродление сертификата не настроено (способ ${R_AUTH:-?}, таймер ${R_TIMER:-нет})"
   fi
 
   CERT_TILL="$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
