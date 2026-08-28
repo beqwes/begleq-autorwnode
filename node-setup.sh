@@ -2892,7 +2892,9 @@ COMPOSE
       - $WEBROOT:$WEBROOT:ro
       - /var/www/certbot:/var/www/certbot:ro
       - /dev/shm:/dev/shm:rw
-    command: sh -c 'rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
+    # воркеры под root: иначе они (юзер nginx) не могут писать в unix-сокеты
+    # Xray (xrxh/xrws, права 755) и XHTTP/WS-локейшны отдают 502
+    command: sh -c 'sed -i "s/^user .*/user root;/" /etc/nginx/nginx.conf; rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
 COMPOSE
     ok "docker-compose.yml записан (нода + nginx)"
   else
