@@ -42,6 +42,15 @@ DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
 SITE_THEME="${SITE_THEME:-}"
 XHTTP_PATH="${XHTTP_PATH:-/api/v3/media}"
+# WS-инбаунд (VLESS+WS+TLS): nginx терминирует TLS на nginx.sock и проксирует
+# этот путь на unix-сокет Xray. Панель: inbound VLESS, network=ws, path=$WS_PATH,
+# listen на unix:$WS_SOCKET
+WS_PATH="${WS_PATH:-/api/v2/gateway}"
+WS_SOCKET="${WS_SOCKET:-/dev/shm/xrws.socket}"
+# Hysteria2 — UDP. 443/udp открывается всегда; для отдельного порта или диапазона
+# port-hopping задай --hysteria-port (например 8443 или 20000:50000). Cert Xray
+# берёт из /etc/letsencrypt (том примонтирован в контейнер ноды)
+HYSTERIA_PORT="${HYSTERIA_PORT:-0}"
 # Reality-инбаунд отдаёт «украденный» сайт по адресу из dest. Панели пишут туда
 # либо unix-сокет, либо 127.0.0.1:9443 — поэтому слушаем оба варианта сразу
 FALLBACK_PORT="${FALLBACK_PORT:-9443}"
@@ -77,6 +86,9 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --domain <host>      self-steal домен ноды: сертификат, nginx и сайт-заглушка
   --email <mail>       почта для Let's Encrypt (по умолчанию admin@домен)
   --xhttp-path <path>  путь, который nginx отдаёт Xray (по умолчанию /api/v3/media)
+  --ws-path <path>     путь nginx→Xray для VLESS+WS+TLS (по умолчанию /api/v2/gateway)
+  --hysteria-port <p>  доп. UDP-порт/диапазон под Hysteria2 (443/udp открыт всегда;
+                       пример: 8443 или 20000:50000 для port-hopping)
   --fallback-port <p>  локальный порт для dest у Reality (по умолчанию 9443, 0 — выключить)
   --site-theme <t>     стиль заглушки: breakcore, lofi, dnb, synthwave, phonk,
                        ambient (по умолчанию случайный)
@@ -123,6 +135,8 @@ while [ $# -gt 0 ]; do
     --domain)      DOMAIN="${2:-}"; shift 2;;
     --email)       EMAIL="${2:-}"; shift 2;;
     --xhttp-path)  XHTTP_PATH="${2:-}"; shift 2;;
+    --ws-path)     WS_PATH="${2:-}"; shift 2;;
+    --hysteria-port) HYSTERIA_PORT="${2:-0}"; shift 2;;
     --fallback-port) FALLBACK_PORT="${2:-9443}"; shift 2;;
     --site-theme)  SITE_THEME="${2:-}"; shift 2;;
     --force-site)  FORCE_SITE=1; shift;;
@@ -1243,6 +1257,14 @@ else
   ufw allow 443/tcp comment 'VPN tls' >/dev/null 2>&1
   ufw allow 443/udp comment 'VPN quic/hysteria' >/dev/null 2>&1
   ufw allow 80/tcp  comment 'certbot' >/dev/null 2>&1
+  # отдельный UDP-порт/диапазон под Hysteria2 (443/udp уже открыт выше)
+  if [ "${HYSTERIA_PORT:-0}" != "0" ] && [ "$HYSTERIA_PORT" != "443" ]; then
+    if ufw allow "${HYSTERIA_PORT}/udp" comment 'hysteria2' >/dev/null 2>&1; then
+      ok "открыт UDP $HYSTERIA_PORT под Hysteria2"
+    else
+      err "не смог открыть UDP $HYSTERIA_PORT (формат: 8443 или 20000:50000)"
+    fi
+  fi
   UFW_STATE="$(ufw status 2>/dev/null | head -1)"
   case "$UFW_STATE" in
     *active*) ok "ufw уже включён, правила добавлены" ;;
@@ -2671,6 +2693,18 @@ server {
         proxy_pass http://unix:/dev/shm/xrxh.socket;
     }
 
+    location $WS_PATH {
+        proxy_set_header X-Real-IP \$proxy_protocol_addr;
+        proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_http_version 1.1;
+        proxy_read_timeout 315s;
+        proxy_send_timeout 5m;
+        proxy_pass http://unix:$WS_SOCKET;
+    }
+
     location / {
         try_files \$uri \$uri/ /index.html;
     }
@@ -2741,6 +2775,16 @@ server {
         proxy_pass http://unix:/dev/shm/xrxh.socket;
     }
 
+    location $WS_PATH {
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_http_version 1.1;
+        proxy_read_timeout 315s;
+        proxy_send_timeout 5m;
+        proxy_pass http://unix:$WS_SOCKET;
+    }
+
     location / {
         try_files \$uri \$uri/ /index.html;
     }
@@ -2755,7 +2799,12 @@ server {
 NGINX
     ok "заглушка также слушает 127.0.0.1:$FALLBACK_PORT (для dest вида 127.0.0.1:$FALLBACK_PORT)"
   fi
-  ok "nginx.conf записан (домен $DOMAIN, путь $XHTTP_PATH → /dev/shm/xrxh.socket)"
+  ok "nginx.conf записан (домен $DOMAIN; XHTTP $XHTTP_PATH → /dev/shm/xrxh.socket; WS $WS_PATH → $WS_SOCKET)"
+  say "     инбаунды в панели для этой ноды (Xray подхватит сокеты из /dev/shm):"
+  say "       • VLESS Reality — serverNames содержит $DOMAIN; dest=/dev/shm/nginx.sock (proxyProtocol) или 127.0.0.1:$FALLBACK_PORT"
+  say "       • VLESS XHTTP   — path=$XHTTP_PATH; listen unix:/dev/shm/xrxh.socket"
+  say "       • VLESS WS+TLS  — network=ws, path=$WS_PATH; listen unix:$WS_SOCKET (nginx терминирует TLS)"
+  say "       • Hysteria2     — UDP :443$([ "${HYSTERIA_PORT:-0}" != "0" ] && echo " и :$HYSTERIA_PORT"); cert /etc/letsencrypt/live/$DOMAIN/{fullchain,privkey}.pem"
   if ! [ -f "$CERT_DIR/fullchain.pem" ]; then
     warn "сертификата ещё нет — nginx будет падать по кругу, пока он не появится"
   fi
