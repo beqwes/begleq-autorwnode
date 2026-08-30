@@ -156,8 +156,7 @@ bash node-setup.sh --bbr-only
 ## Yandex CDN
 
 Отдельный пункт: нода становится origin для Yandex Cloud CDN, клиенты ходят
-на публичный домен, эджи бьют в origin на `:443`. Схема снята с живого прода
-(`origin.example.com` → `cdn.example.com`): nginx слушает 80/443, Xray —
+на публичный домен, эджи бьют в origin на `:443`. nginx слушает 80/443, Xray —
 только `127.0.0.1:11443` с XHTTP `packet-up`. Reality self-steal на `:443`
 с этим режимом не совмещается.
 

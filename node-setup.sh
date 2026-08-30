@@ -60,8 +60,7 @@ DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; D
 # иначе панель или соседняя нода попадут под раздачу
 TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
 FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
-# Yandex CDN: nginx на :443, Xray XHTTP на loopback. Снято с живого origin
-# 203.0.113.50 (origin.example.com → cdn.example.com)
+# Yandex CDN: nginx на :443, Xray XHTTP на loopback.
 CDN_ORIGIN="${CDN_ORIGIN:-}"; CDN_PUBLIC="${CDN_PUBLIC:-}"; CDN_PATH="${CDN_PATH:-}"
 CDN_XRAY_PORT="${CDN_XRAY_PORT:-}"; CDN_EDGE_HEADER="${CDN_EDGE_HEADER:-X-Cdn-Secret}"
 CDN_EDGE_VALUE="${CDN_EDGE_VALUE:-}"; CDN_OPEN_ORIGIN=0; CDN_WANT_SECRET=0
@@ -470,7 +469,6 @@ purge_warp() {
 }
 
 # Yandex CDN: nginx слушает :443 снаружи, Xray — только 127.0.0.1.
-# Схема снята с прода 203.0.113.50 (origin.example.com → cdn.example.com).
 # Reality self-steal на :443 с этим режимом не совмещается: порт забирает nginx.
 cdn_header_var() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '-' '_'
@@ -702,7 +700,7 @@ install_yandex_cdn() {
   say "  nginx заберёт :443 и будет проксировать XHTTP на 127.0.0.1."
   say "  Reality self-steal на этом порту работать перестанет — в панели"
   say "  нужен отдельный XHTTP-инбаунд на loopback."
-  say "  Эталон схемы: origin.example.com (origin) → cdn.example.com (CDN)."
+  say "  Схема: origin-домен (A на ноду) → публичный домен (CNAME на тех-домен CDN)."
   say ""
 
   ask CDN_ORIGIN "Origin-домен (A-запись на эту ноду)" "${CDN_ORIGIN:-}"
