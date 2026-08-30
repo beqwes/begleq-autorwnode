@@ -172,7 +172,8 @@ bash node-setup.sh --yandex-cdn --cdn-origin origin.example --cdn-public cdn.exa
 Скрипт спросит origin-домен, публичный домен, путь и порт Xray, выпустит
 сертификат Let's Encrypt на origin, перепишет nginx (буферизация и gzip
 выключены — иначе восходящий XHTTP рвётся), закроет `:11443` снаружи и
-положит готовый инбаунд в `/opt/remnanode/yandex-cdn-inbound.json`.
+положит полный конфиг Xray в `/opt/remnanode/yandex-cdn-xray.json`
+(host = публичный домен, который указали — CNAME на тех-домен CDN).
 
 По умолчанию origin закрывается заголовком `X-Cdn-Secret`: его же надо
 прописать в `staticRequestHeaders` ресурса CDN. Как на эталоне, без секрета:
@@ -187,7 +188,7 @@ bash node-setup.sh --yandex-cdn --cdn-open-origin
 - в консоли CDN: HTTPS к origin, Host = origin-домен, кеш/slice/Range выкл.,
   query и cookie не выкидывать
 - хост в панели: `address` = тех-домен CDN, `host`/`sni` = публичный домен,
-  `xHttpExtraParams` = extra из инбаунда (панель сама не копирует)
+  `xHttpExtraParams` = extra из конфига (панель сама не копирует)
 
 ## Меню настроек
 

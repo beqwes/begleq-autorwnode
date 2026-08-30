@@ -115,7 +115,7 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --no-bbr             не трогать sysctl и BBR
   --yandex-cdn         настроить origin под Yandex CDN (nginx :443 → XHTTP) и выйти
   --cdn-origin <host>  origin-домен (A-запись на эту ноду, сертификат LE)
-  --cdn-public <host>  публичный домен CDN (тот, что видит клиент)
+  --cdn-public <host>  публичный домен (CNAME на тех-домен CDN, его видит клиент)
   --cdn-path <path>    путь XHTTP (по умолчанию /api/v3/media/session/pullet)
   --cdn-xray-port <p>  локальный порт Xray (по умолчанию 11443)
   --cdn-secret         закрыть origin заголовком, который подставляет CDN
@@ -492,63 +492,138 @@ cdn_load_state() {
   CDN_EDGE_VALUE="$(grep -E '^CDN_EDGE_VALUE=' "$INSTALL_DIR/yandex-cdn.env" | head -1 | cut -d= -f2-)"
 }
 
-write_yandex_cdn_inbound() {
-  # extra проверено на живом CDN: имена ключей не рандомизируем, иначе
-  # подписка разъедется с инбаундом. Разводим деплои path и доменом.
+write_yandex_cdn_config() {
+  # полный профиль как на эталоне: host = публичный домен (CNAME на тех-домен CDN).
+  # extra не рандомизируем — иначе подписка разъедется с инбаундом.
+  CDN_XRAY_PORT="${CDN_XRAY_PORT:-11443}"
+  CDN_PATH="${CDN_PATH:-/api/v3/media/session/pullet}"
+  [ -n "${CDN_PUBLIC:-}" ] || return 1
   mkdir -p "$INSTALL_DIR"
-  cat > "$INSTALL_DIR/yandex-cdn-inbound.json" <<JSON
+  cat > "$INSTALL_DIR/yandex-cdn-xray.json" <<JSON
 {
-  "tag": "YA-CDN",
-  "listen": "127.0.0.1",
-  "port": ${CDN_XRAY_PORT},
-  "protocol": "vless",
-  "settings": { "clients": [], "decryption": "none" },
-  "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] },
-  "streamSettings": {
-    "network": "xhttp",
-    "security": "none",
-    "xhttpSettings": {
-      "host": "${CDN_PUBLIC}",
-      "mode": "packet-up",
-      "path": "${CDN_PATH}",
-      "extra": {
-        "xmux": {
-          "cMaxReuseTimes": "36-96",
-          "maxConcurrency": "6-16",
-          "hKeepAlivePeriod": 0,
-          "hMaxRequestTimes": "320-640",
-          "hMaxReusableSecs": "720-1800"
-        },
-        "seqKey": "offset",
-        "headers": {
-          "Accept": "application/vnd.api+json, application/json, text/plain, */*",
-          "Pragma": "no-cache",
-          "Cache-Control": "no-cache",
-          "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
-        },
-        "sessionKey": "media_sid",
-        "xPaddingKey": "q",
-        "seqPlacement": "query",
-        "sessionIDKey": "media_sid",
-        "uplinkDataKey": "X-Playback-Token",
-        "xPaddingBytes": "48-320",
-        "xPaddingHeader": "X-Rewrite-URL",
-        "xPaddingMethod": "tokenish",
-        "sessionPlacement": "cookie",
-        "uplinkHTTPMethod": "GET",
-        "xPaddingObfsMode": true,
-        "xPaddingPlacement": "queryInHeader",
-        "scMaxBufferedPosts": 32,
-        "scMaxEachPostBytes": "10240-20480",
-        "sessionIDPlacement": "cookie",
-        "uplinkDataPlacement": "header",
-        "scMinPostsIntervalMs": "4-18",
-        "serverMaxHeaderBytes": 32768
+  "log": {
+    "loglevel": "none"
+  },
+  "inbounds": [
+    {
+      "tag": "YA-CDN-02",
+      "port": ${CDN_XRAY_PORT},
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "none",
+        "xhttpSettings": {
+          "host": "${CDN_PUBLIC}",
+          "mode": "packet-up",
+          "path": "${CDN_PATH}",
+          "extra": {
+            "xmux": {
+              "cMaxReuseTimes": "36-96",
+              "maxConcurrency": "6-16",
+              "hKeepAlivePeriod": 0,
+              "hMaxRequestTimes": "320-640",
+              "hMaxReusableSecs": "720-1800"
+            },
+            "seqKey": "offset",
+            "headers": {
+              "Accept": "application/vnd.api+json, application/json, text/plain, */*",
+              "Pragma": "no-cache",
+              "Cache-Control": "no-cache",
+              "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+            },
+            "sessionKey": "media_sid",
+            "xPaddingKey": "q",
+            "seqPlacement": "query",
+            "sessionIDKey": "media_sid",
+            "uplinkDataKey": "X-Playback-Token",
+            "xPaddingBytes": "48-320",
+            "xPaddingHeader": "X-Rewrite-URL",
+            "xPaddingMethod": "tokenish",
+            "sessionPlacement": "cookie",
+            "uplinkHTTPMethod": "GET",
+            "xPaddingObfsMode": true,
+            "xPaddingPlacement": "queryInHeader",
+            "scMaxBufferedPosts": 32,
+            "scMaxEachPostBytes": "10240-20480",
+            "sessionIDPlacement": "cookie",
+            "uplinkDataPlacement": "header",
+            "scMinPostsIntervalMs": "4-18",
+            "serverMaxHeaderBytes": 32768
+          }
+        }
       }
     }
+  ],
+  "outbounds": [
+    {
+      "tag": "DIRECT",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "BLOCK",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "ip": [
+          "geoip:private"
+        ],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "domain": [
+          "domain:ua",
+          "domain:gov",
+          "domain:gov.ru"
+        ],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "port": "25,135-139,445,1900,6881,51413",
+        "outboundTag": "BLOCK"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "full:sc.dqmop.com",
+          "domain:ycxrl.com",
+          "regexp:.*badbox.*"
+        ],
+        "ruleTag": "BOTNET_MALWARE_DETECT",
+        "outboundTag": "BLOCK"
+      },
+      {
+        "domain": [
+          "geosite:private"
+        ],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "protocol": [
+          "bittorrent"
+        ],
+        "outboundTag": "BLOCK"
+      }
+    ]
   }
 }
 JSON
+  cp -f "$INSTALL_DIR/yandex-cdn-xray.json" "$INSTALL_DIR/yandex-cdn-inbound.json"
 }
 
 print_yandex_cdn_help() {
@@ -556,6 +631,9 @@ print_yandex_cdn_help() {
   if [ -z "${CDN_ORIGIN:-}" ] && ! cdn_mode; then
     warn "Yandex CDN ещё не настроен — сначала пункт 11 или bash $0 --yandex-cdn"
     return 1
+  fi
+  if [ -n "${CDN_PUBLIC:-}" ] && [ -n "${CDN_PATH:-}" ] && [ -n "${CDN_XRAY_PORT:-}" ]; then
+    write_yandex_cdn_config
   fi
   MY_IP="$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
   say "  ${CB}Yandex CDN — origin на этой ноде${C0}"
@@ -589,9 +667,10 @@ print_yandex_cdn_help() {
     say "     (без этого заголовка nginx на origin отдаст 404)"
   fi
   say ""
-  say "  ${CB}3. Инбаунд в профиле ноды в панели${C0}"
-  say "     вставь содержимое $INSTALL_DIR/yandex-cdn-inbound.json"
-  say "     слушает только 127.0.0.1 — TLS терминирует nginx, security: none"
+  say "  ${CB}3. Конфиг Xray — вставь в профиль ноды в панели${C0}"
+  say "     файл: $INSTALL_DIR/yandex-cdn-xray.json"
+  say "     host в xhttpSettings = публичный домен (CNAME на тех-домен CDN)"
+  say "     слушает 127.0.0.1:${CDN_XRAY_PORT:-11443} — TLS терминирует nginx"
   say "     Reality на :443 с этим режимом не совмещается: порт занят nginx"
   say ""
   say "  ${CB}4. Хост в панели${C0}"
@@ -600,9 +679,10 @@ print_yandex_cdn_help() {
   say "     path           : ${CDN_PATH:-/api/v3/media/session/pullet}"
   say "     xHttpExtraParams — те же extra, что в инбаунде (панель сама не копирует)"
   say ""
-  if [ -f "$INSTALL_DIR/yandex-cdn-inbound.json" ]; then
-    say "  файл инбаунда:"
-    sed 's/^/    /' "$INSTALL_DIR/yandex-cdn-inbound.json"
+  if [ -f "$INSTALL_DIR/yandex-cdn-xray.json" ]; then
+    say "  ${CB}конфиг Xray:${C0}"
+    cat "$INSTALL_DIR/yandex-cdn-xray.json"
+    say ""
   fi
 }
 
@@ -627,8 +707,8 @@ install_yandex_cdn() {
 
   ask CDN_ORIGIN "Origin-домен (A-запись на эту ноду)" "${CDN_ORIGIN:-}"
   [ -n "$CDN_ORIGIN" ] || die "без origin-домена CDN не настроить"
-  ask CDN_PUBLIC "Публичный домен CDN (тот, что видит клиент)" "${CDN_PUBLIC:-}"
-  [ -n "$CDN_PUBLIC" ] || die "нужен публичный домен, который повесишь на CDN"
+  ask CDN_PUBLIC "Публичный домен (CNAME на тех-домен CDN)" "${CDN_PUBLIC:-}"
+  [ -n "$CDN_PUBLIC" ] || die "нужен публичный домен — CNAME на тех-домен из консоли CDN"
   ask EMAIL "Почта для Let's Encrypt" "${EMAIL:-admin@$CDN_ORIGIN}"
   ask CDN_PATH "Путь XHTTP" "${CDN_PATH:-/api/v3/media/session/pullet}"
   ask CDN_XRAY_PORT "Локальный порт Xray" "${CDN_XRAY_PORT:-11443}"
@@ -938,8 +1018,9 @@ CDN_EDGE_HEADER=$CDN_EDGE_HEADER
 CDN_EDGE_VALUE=$CDN_EDGE_VALUE
 ENV
   chmod 600 "$INSTALL_DIR/yandex-cdn.env"
-  write_yandex_cdn_inbound
+  write_yandex_cdn_config
   ok "состояние записано в $INSTALL_DIR/yandex-cdn.env"
+  ok "конфиг Xray: $INSTALL_DIR/yandex-cdn-xray.json"
 
   say ""
   print_yandex_cdn_help
