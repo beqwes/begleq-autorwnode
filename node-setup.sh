@@ -16,7 +16,7 @@
 # =============================================================================
 set -u
 
-VERSION="4.4"
+VERSION="4.5"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -60,6 +60,12 @@ DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; D
 # иначе панель или соседняя нода попадут под раздачу
 TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
 FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
+# Yandex CDN: nginx на :443, Xray XHTTP на loopback. Снято с живого origin
+# 203.0.113.50 (origin.example.com → cdn.example.com)
+CDN_ORIGIN="${CDN_ORIGIN:-}"; CDN_PUBLIC="${CDN_PUBLIC:-}"; CDN_PATH="${CDN_PATH:-}"
+CDN_XRAY_PORT="${CDN_XRAY_PORT:-}"; CDN_EDGE_HEADER="${CDN_EDGE_HEADER:-X-Cdn-Secret}"
+CDN_EDGE_VALUE="${CDN_EDGE_VALUE:-}"; CDN_OPEN_ORIGIN=0; CDN_WANT_SECRET=0
+YANDEX_CDN_ONLY=0; YANDEX_CDN_SHOW=0
 
 # ---------- вывод ----------
 if [ -t 1 ]; then C0=$'\e[0m'; CB=$'\e[1m'; CG=$'\e[32m'; CY=$'\e[33m'; CR=$'\e[31m'; CC=$'\e[36m'; CM=$'\e[35m'
@@ -107,6 +113,14 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --menu               открыть меню настроек (то же, что команда begleq)
   --bbr-only           только включить BBR и сетевые лимиты, затем выйти
   --no-bbr             не трогать sysctl и BBR
+  --yandex-cdn         настроить origin под Yandex CDN (nginx :443 → XHTTP) и выйти
+  --cdn-origin <host>  origin-домен (A-запись на эту ноду, сертификат LE)
+  --cdn-public <host>  публичный домен CDN (тот, что видит клиент)
+  --cdn-path <path>    путь XHTTP (по умолчанию /api/v3/media/session/pullet)
+  --cdn-xray-port <p>  локальный порт Xray (по умолчанию 11443)
+  --cdn-secret         закрыть origin заголовком, который подставляет CDN
+  --cdn-open-origin    не ставить секрет (как на эталоне: origin открыт)
+  --cdn-show           показать инструкцию для панели и консоли CDN и выйти
   --no-motd            не ставить отчёт о ноде при входе по SSH
   --motd-only          только поставить отчёт при входе и выйти
   --hostname <name>    переименовать сервер
@@ -153,6 +167,14 @@ while [ $# -gt 0 ]; do
     --menu)        MENU=1; shift;;
     --bbr-only)    BBR_ONLY=1; shift;;
     --no-bbr)      DO_BBR=0; shift;;
+    --yandex-cdn)  YANDEX_CDN_ONLY=1; shift;;
+    --cdn-origin)  CDN_ORIGIN="${2:-}"; shift 2;;
+    --cdn-public)  CDN_PUBLIC="${2:-}"; shift 2;;
+    --cdn-path)    CDN_PATH="${2:-}"; shift 2;;
+    --cdn-xray-port) CDN_XRAY_PORT="${2:-}"; shift 2;;
+    --cdn-secret)  CDN_WANT_SECRET=1; shift;;
+    --cdn-open-origin) CDN_OPEN_ORIGIN=1; shift;;
+    --cdn-show)    YANDEX_CDN_SHOW=1; shift;;
     --no-motd)     DO_MOTD=0; shift;;
     --motd-only)   MOTD_ONLY=1; shift;;
     --hostname)    NEW_HOSTNAME="${2:-}"; shift 2;;
@@ -272,8 +294,11 @@ menu_main() {
     CC_ST="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
     ip link show warp >/dev/null 2>&1 && W_ST="поднят" || W_ST="выключен"
     ipset list TG-BLOCK-V4 >/dev/null 2>&1 && TG_ST="$(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]') сетей" || TG_ST="не стоит"
+    CDN_ST="нет"
+    [ -f "$INSTALL_DIR/yandex-cdn.env" ] && CDN_ST="origin"
     printf '  нода: %-12s nginx: %-12s BBR: %-6s WARP: %-9s TrafficGuard: %s\n' \
       "${NODE_ST:-нет}" "${NGX_ST:-нет}" "${CC_ST:-?}" "$W_ST" "$TG_ST"
+    printf '  Yandex CDN: %s\n' "$CDN_ST"
     say ""
     say "  1) состояние ноды подробно"
     say "  2) настроить или обновить ноду"
@@ -285,6 +310,8 @@ menu_main() {
     say "  8) заглушка: пересобрать"
     say "  9) показать outbound для панели"
     say " 10) обновить сам скрипт с гитхаба"
+    say " 11) Yandex CDN: настроить origin"
+    say " 12) Yandex CDN: инструкция для панели и консоли"
     say "  0) выход"
     say ""
     printf '%b' "${CC}?${C0} выбор: "
@@ -335,6 +362,8 @@ menu_main() {
           else
             err "не смог скачать с гитхаба"
           fi ;;
+      11) bash "$SELF" --yandex-cdn ;;
+      12) bash "$SELF" --cdn-show ;;
       0|q|"") say "пока"; return 0 ;;
       *)  warn "нет такого пункта" ;;
     esac
@@ -440,6 +469,481 @@ purge_warp() {
   say "      убери outbound warp из конфига ноды в панели"
 }
 
+# Yandex CDN: nginx слушает :443 снаружи, Xray — только 127.0.0.1.
+# Схема снята с прода 203.0.113.50 (origin.example.com → cdn.example.com).
+# Reality self-steal на :443 с этим режимом не совмещается: порт забирает nginx.
+cdn_header_var() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '-' '_'
+}
+
+cdn_mode() {
+  [ -f "$INSTALL_DIR/yandex-cdn.env" ] && return 0
+  [ -f "$INSTALL_DIR/nginx.conf" ] && grep -qE 'upstream xray_xhttp' "$INSTALL_DIR/nginx.conf" && return 0
+  return 1
+}
+
+cdn_load_state() {
+  [ -s "$INSTALL_DIR/yandex-cdn.env" ] || return 1
+  CDN_ORIGIN="$(grep -E '^CDN_ORIGIN=' "$INSTALL_DIR/yandex-cdn.env" | head -1 | cut -d= -f2-)"
+  CDN_PUBLIC="$(grep -E '^CDN_PUBLIC=' "$INSTALL_DIR/yandex-cdn.env" | head -1 | cut -d= -f2-)"
+  CDN_PATH="$(grep -E '^CDN_PATH=' "$INSTALL_DIR/yandex-cdn.env" | head -1 | cut -d= -f2-)"
+  CDN_XRAY_PORT="$(grep -E '^CDN_XRAY_PORT=' "$INSTALL_DIR/yandex-cdn.env" | head -1 | cut -d= -f2-)"
+  CDN_EDGE_HEADER="$(grep -E '^CDN_EDGE_HEADER=' "$INSTALL_DIR/yandex-cdn.env" | head -1 | cut -d= -f2-)"
+  CDN_EDGE_VALUE="$(grep -E '^CDN_EDGE_VALUE=' "$INSTALL_DIR/yandex-cdn.env" | head -1 | cut -d= -f2-)"
+}
+
+write_yandex_cdn_inbound() {
+  # extra проверено на живом CDN: имена ключей не рандомизируем, иначе
+  # подписка разъедется с инбаундом. Разводим деплои path и доменом.
+  mkdir -p "$INSTALL_DIR"
+  cat > "$INSTALL_DIR/yandex-cdn-inbound.json" <<JSON
+{
+  "tag": "YA-CDN",
+  "listen": "127.0.0.1",
+  "port": ${CDN_XRAY_PORT},
+  "protocol": "vless",
+  "settings": { "clients": [], "decryption": "none" },
+  "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] },
+  "streamSettings": {
+    "network": "xhttp",
+    "security": "none",
+    "xhttpSettings": {
+      "host": "${CDN_PUBLIC}",
+      "mode": "packet-up",
+      "path": "${CDN_PATH}",
+      "extra": {
+        "xmux": {
+          "cMaxReuseTimes": "36-96",
+          "maxConcurrency": "6-16",
+          "hKeepAlivePeriod": 0,
+          "hMaxRequestTimes": "320-640",
+          "hMaxReusableSecs": "720-1800"
+        },
+        "seqKey": "offset",
+        "headers": {
+          "Accept": "application/vnd.api+json, application/json, text/plain, */*",
+          "Pragma": "no-cache",
+          "Cache-Control": "no-cache",
+          "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+        },
+        "sessionKey": "media_sid",
+        "xPaddingKey": "q",
+        "seqPlacement": "query",
+        "sessionIDKey": "media_sid",
+        "uplinkDataKey": "X-Playback-Token",
+        "xPaddingBytes": "48-320",
+        "xPaddingHeader": "X-Rewrite-URL",
+        "xPaddingMethod": "tokenish",
+        "sessionPlacement": "cookie",
+        "uplinkHTTPMethod": "GET",
+        "xPaddingObfsMode": true,
+        "xPaddingPlacement": "queryInHeader",
+        "scMaxBufferedPosts": 32,
+        "scMaxEachPostBytes": "10240-20480",
+        "sessionIDPlacement": "cookie",
+        "uplinkDataPlacement": "header",
+        "scMinPostsIntervalMs": "4-18",
+        "serverMaxHeaderBytes": 32768
+      }
+    }
+  }
+}
+JSON
+}
+
+print_yandex_cdn_help() {
+  cdn_load_state || true
+  if [ -z "${CDN_ORIGIN:-}" ] && ! cdn_mode; then
+    warn "Yandex CDN ещё не настроен — сначала пункт 11 или bash $0 --yandex-cdn"
+    return 1
+  fi
+  MY_IP="$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+  say "  ${CB}Yandex CDN — origin на этой ноде${C0}"
+  say "     origin     ${CDN_ORIGIN:-—}  (A → ${MY_IP:-эта нода})"
+  say "     публичный  ${CDN_PUBLIC:-—}"
+  say "     путь       ${CDN_PATH:-—}"
+  say "     Xray       127.0.0.1:${CDN_XRAY_PORT:-11443}"
+  if [ -n "${CDN_EDGE_VALUE:-}" ]; then
+    say "     секрет     ${CDN_EDGE_HEADER} (CDN → origin, nginx без него отдаёт 404)"
+  else
+    say "     секрет     нет — origin отвечает всему интернету (как на эталоне)"
+  fi
+  say ""
+  say "  ${CB}1. DNS${C0}"
+  say "     A   ${CDN_ORIGIN:-origin.example}  →  ${MY_IP:-IP_НОДЫ}"
+  say "     CNAME ${CDN_PUBLIC:-cdn.example}  →  <provider_cname> из консоли CDN"
+  say "     (у живого прода это вид *.topology.gslb.yccdn.ru)"
+  say ""
+  say "  ${CB}2. Ресурс в консоли Yandex Cloud CDN${C0}"
+  say "     источник:           ${CDN_ORIGIN:-origin}:443"
+  say "     протокол к origin:  HTTPS"
+  say "     Host к origin:      ${CDN_ORIGIN:-origin}   (не публичный домен)"
+  say "     кеш:                выключить"
+  say "     query string:       не игнорировать  (в ней seq / offset)"
+  say "     cookie:             не игнорировать  (в ней media_sid)"
+  say "     slice / Range:      выключить"
+  say "     методы:             GET POST HEAD OPTIONS PUT PATCH DELETE"
+  say "     сертификат:         публичного домена — в Certificate Manager"
+  if [ -n "${CDN_EDGE_VALUE:-}" ]; then
+    say "     staticRequestHeaders: ${CDN_EDGE_HEADER}: ${CDN_EDGE_VALUE}"
+    say "     (без этого заголовка nginx на origin отдаст 404)"
+  fi
+  say ""
+  say "  ${CB}3. Инбаунд в профиле ноды в панели${C0}"
+  say "     вставь содержимое $INSTALL_DIR/yandex-cdn-inbound.json"
+  say "     слушает только 127.0.0.1 — TLS терминирует nginx, security: none"
+  say "     Reality на :443 с этим режимом не совмещается: порт занят nginx"
+  say ""
+  say "  ${CB}4. Хост в панели${C0}"
+  say "     address / порт : <provider_cname> : 443"
+  say "     host / sni     : ${CDN_PUBLIC:-публичный.домен}"
+  say "     path           : ${CDN_PATH:-/api/v3/media/session/pullet}"
+  say "     xHttpExtraParams — те же extra, что в инбаунде (панель сама не копирует)"
+  say ""
+  if [ -f "$INSTALL_DIR/yandex-cdn-inbound.json" ]; then
+    say "  файл инбаунда:"
+    sed 's/^/    /' "$INSTALL_DIR/yandex-cdn-inbound.json"
+  fi
+}
+
+install_yandex_cdn() {
+  part "Yandex CDN: origin"
+  mkdir -p "$INSTALL_DIR"
+  cdn_load_state || true
+
+  if [ -z "${CDN_ORIGIN:-}" ] && [ -n "${DOMAIN:-}" ]; then
+    CDN_ORIGIN="$DOMAIN"
+  fi
+  if [ -z "${CDN_ORIGIN:-}" ] && [ -f "$INSTALL_DIR/nginx.conf" ]; then
+    CDN_ORIGIN="$(grep -m1 -E '^[[:space:]]*server_name[[:space:]]+' "$INSTALL_DIR/nginx.conf" \
+                  | sed -E 's/.*server_name[[:space:]]+//; s/;.*//; s/[[:space:]].*//')"
+  fi
+
+  say "  nginx заберёт :443 и будет проксировать XHTTP на 127.0.0.1."
+  say "  Reality self-steal на этом порту работать перестанет — в панели"
+  say "  нужен отдельный XHTTP-инбаунд на loopback."
+  say "  Эталон схемы: origin.example.com (origin) → cdn.example.com (CDN)."
+  say ""
+
+  ask CDN_ORIGIN "Origin-домен (A-запись на эту ноду)" "${CDN_ORIGIN:-}"
+  [ -n "$CDN_ORIGIN" ] || die "без origin-домена CDN не настроить"
+  ask CDN_PUBLIC "Публичный домен CDN (тот, что видит клиент)" "${CDN_PUBLIC:-}"
+  [ -n "$CDN_PUBLIC" ] || die "нужен публичный домен, который повесишь на CDN"
+  ask EMAIL "Почта для Let's Encrypt" "${EMAIL:-admin@$CDN_ORIGIN}"
+  ask CDN_PATH "Путь XHTTP" "${CDN_PATH:-/api/v3/media/session/pullet}"
+  ask CDN_XRAY_PORT "Локальный порт Xray" "${CDN_XRAY_PORT:-11443}"
+
+  case "$CDN_PATH" in
+    /*) : ;;
+    *) CDN_PATH="/$CDN_PATH" ;;
+  esac
+  case "${CDN_XRAY_PORT:-}" in
+    ''|*[!0-9]*) die "порт Xray должен быть числом, а не «$CDN_XRAY_PORT»" ;;
+  esac
+
+  if [ "$CDN_OPEN_ORIGIN" = "1" ]; then
+    CDN_EDGE_VALUE=""
+    ok "origin останется открытым — как на эталоне"
+  elif [ -n "$CDN_EDGE_VALUE" ]; then
+    ok "секрет origin уже есть, оставляю"
+  elif [ "$CDN_WANT_SECRET" = "1" ]; then
+    CDN_EDGE_VALUE="$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 32)"
+    [ -n "$CDN_EDGE_VALUE" ] || CDN_EDGE_VALUE="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+    ok "секрет origin сгенерирован — CDN должен подставлять ${CDN_EDGE_HEADER}"
+  elif confirm "Закрыть origin секретным заголовком (CDN подставляет сам)?" y; then
+    CDN_EDGE_VALUE="$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 32)"
+    [ -n "$CDN_EDGE_VALUE" ] || CDN_EDGE_VALUE="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+    ok "секрет origin сгенерирован — CDN должен подставлять ${CDN_EDGE_HEADER}"
+  else
+    CDN_EDGE_VALUE=""
+    warn "origin будет открыт всему интернету"
+  fi
+
+  RESOLVED="$(getent ahostsv4 "$CDN_ORIGIN" 2>/dev/null | awk 'NR==1{print $1}')"
+  MY_IP="$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null)"
+  if [ -z "$RESOLVED" ]; then
+    warn "$CDN_ORIGIN не резолвится — сертификат не выпустится, пока не появится A-запись"
+  elif [ -n "$MY_IP" ] && [ "$RESOLVED" != "$MY_IP" ]; then
+    warn "$CDN_ORIGIN указывает на $RESOLVED, а сервер $MY_IP — сертификат не выпустится"
+  else
+    ok "DNS: $CDN_ORIGIN → ${RESOLVED:-$MY_IP}"
+  fi
+
+  if ! confirm "Писать nginx под Yandex CDN?" y; then
+    die "отменено"
+  fi
+
+  # --- сертификат на origin: без него nginx на :443 не встанет ---
+  CERT_DIR="/etc/letsencrypt/live/$CDN_ORIGIN"
+  if [ -f "$CERT_DIR/fullchain.pem" ]; then
+    ok "сертификат $CDN_ORIGIN уже есть, годен до $(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+  else
+    command -v certbot >/dev/null 2>&1 || apt-get install -y -qq certbot >/dev/null 2>&1
+    mkdir -p /var/www/certbot
+    ISSUED=0
+    if [ -n "$(ss -tlnH 2>/dev/null | awk '$4 ~ /:80$/ {print}' | head -1)" ] && [ -d /var/www/certbot ]; then
+      if certbot certonly --webroot -w /var/www/certbot -n --agree-tos -m "$EMAIL" -d "$CDN_ORIGIN" >/dev/null 2>&1; then
+        ISSUED=1
+      fi
+    fi
+    if [ "$ISSUED" != "1" ]; then
+      docker stop remnawave-nginx >/dev/null 2>&1 || true
+      ufw allow 80/tcp >/dev/null 2>&1 || true
+      if certbot certonly --standalone -n --agree-tos -m "$EMAIL" -d "$CDN_ORIGIN" >/dev/null 2>&1; then
+        ISSUED=1
+      fi
+    fi
+    if [ "$ISSUED" = "1" ]; then
+      ok "сертификат выпущен для $CDN_ORIGIN"
+    else
+      err "certbot не выпустил сертификат для $CDN_ORIGIN (проверь A-запись и :80)"
+    fi
+  fi
+
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-remnawave-nginx.sh <<'HOOK'
+#!/bin/sh
+docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1 || true
+HOOK
+  chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-remnawave-nginx.sh
+  if systemctl list-unit-files --no-pager 2>/dev/null | grep -q "^certbot.timer"; then
+    systemctl enable --now certbot.timer >/dev/null 2>&1
+  fi
+
+  # продление на эталоне — weekly standalone + docker compose down. У нас
+  # nginx сам держит :80 и отдаёт ACME, поэтому webroot, без остановки стека
+  RCONF="/etc/letsencrypt/renewal/${CDN_ORIGIN}.conf"
+  if [ -f "$RCONF" ]; then
+    sed -i 's/^authenticator = .*/authenticator = webroot/' "$RCONF"
+    grep -q '^webroot_path' "$RCONF" || sed -i '/^authenticator = webroot/a webroot_path = /var/www/certbot,' "$RCONF"
+    ok "продление $CDN_ORIGIN переведено на webroot"
+  fi
+
+  # --- nginx-main: как на эталоне, иначе под нагрузкой CDN упираемся в 1024 ---
+  [ -f "$INSTALL_DIR/nginx-main.conf" ] && cp -a "$INSTALL_DIR/nginx-main.conf" "$INSTALL_DIR/nginx-main.conf.bak.$STAMP"
+  cat > "$INSTALL_DIR/nginx-main.conf" <<'NGXMAIN'
+user nginx;
+worker_processes auto;
+worker_rlimit_nofile 65535;
+
+events {
+    worker_connections 16384;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    keepalive_timeout 65;
+    include /etc/nginx/conf.d/*.conf;
+}
+NGXMAIN
+  ok "nginx-main.conf записан"
+
+  CDN_GUARD=""
+  if [ -n "$CDN_EDGE_VALUE" ]; then
+    CDN_HV="$(cdn_header_var "$CDN_EDGE_HEADER")"
+    CDN_GUARD="
+        # Пускаем только эджи CDN: заголовок подставляет staticRequestHeaders
+        if (\$http_${CDN_HV} != \"${CDN_EDGE_VALUE}\") {
+            return 404;
+        }"
+  fi
+
+  [ -f "$INSTALL_DIR/nginx.conf" ] && { cp -a "$INSTALL_DIR/nginx.conf" "$INSTALL_DIR/nginx.conf.bak.$STAMP"; ok "бэкап nginx.conf"; }
+  mkdir -p /var/www/certbot "$WEBROOT"
+  if [ ! -f "$WEBROOT/index.html" ]; then
+    printf '%s\n' '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Media Delivery</title></head><body><h1>Service is running</h1></body></html>' > "$WEBROOT/index.html"
+  fi
+
+  # access_log на эталоне писал в файл внутри контейнера и вырос до 11 ГиБ,
+  # диск кончился. Пишем в stdout — ротацию делает docker (100m × 5).
+  cat > "$INSTALL_DIR/nginx.conf" <<NGINX
+# generated-by: node-setup yandex-cdn
+# origin $CDN_ORIGIN  public $CDN_PUBLIC  xray 127.0.0.1:$CDN_XRAY_PORT
+
+upstream xray_xhttp {
+    server 127.0.0.1:$CDN_XRAY_PORT;
+    keepalive 32;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    listen [::]:443 ssl;
+    server_name $CDN_ORIGIN $CDN_PUBLIC;
+
+    ssl_certificate     /etc/letsencrypt/live/$CDN_ORIGIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$CDN_ORIGIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    large_client_header_buffers 8 64k;
+    client_header_buffer_size 64k;
+
+    access_log /dev/stdout;
+    error_log /dev/stderr warn;
+
+    location ^~ $CDN_PATH {
+$CDN_GUARD
+        # Ядро Xray 26.7.11+ не дописывает хвостовой слэш — возвращаем его
+        rewrite ^$CDN_PATH\$ $CDN_PATH/ break;
+
+        proxy_pass http://xray_xhttp;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection        "";
+
+        proxy_buffering         off;
+        proxy_request_buffering off;
+        proxy_cache             off;
+        gzip                    off;
+
+        proxy_buffer_size 64k;
+        proxy_buffers 8 64k;
+        proxy_busy_buffers_size 128k;
+
+        add_header Cache-Control "no-store" always;
+        add_header X-Accel-Buffering "no" always;
+
+        proxy_connect_timeout 30s;
+        proxy_read_timeout    900s;
+        proxy_send_timeout    900s;
+    }
+
+    location / {
+        root $WEBROOT;
+        index index.html;
+        add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
+    }
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $CDN_ORIGIN $CDN_PUBLIC _;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+NGINX
+  ok "nginx.conf записан (Yandex CDN: $CDN_ORIGIN → 127.0.0.1:$CDN_XRAY_PORT$CDN_PATH)"
+
+  # compose: не переписываем целиком — там SECRET_KEY и чужие сервисы.
+  # Достаточно, чтобы nginx видел main-конфиг, сертификаты и webroot.
+  COMPOSE="$INSTALL_DIR/docker-compose.yml"
+  if [ ! -f "$COMPOSE" ]; then
+    err "нет $COMPOSE — сначала настрой ноду (пункт 2)"
+  else
+    if ! grep -q 'nginx-main.conf:/etc/nginx/nginx.conf' "$COMPOSE"; then
+      if grep -q 'nginx.conf:/etc/nginx/conf.d/default.conf' "$COMPOSE"; then
+        sed -i '/nginx.conf:\/etc\/nginx\/conf.d\/default.conf/a\      - ./nginx-main.conf:/etc/nginx/nginx.conf:ro' "$COMPOSE"
+        ok "в compose добавлен nginx-main.conf"
+      fi
+    fi
+    if ! grep -q '/etc/letsencrypt:/etc/letsencrypt' "$COMPOSE"; then
+      if grep -q 'remnawave-nginx:' "$COMPOSE"; then
+        sed -i '/nginx.conf:\/etc\/nginx\/conf.d\/default.conf/a\      - /etc/letsencrypt:/etc/letsencrypt:ro' "$COMPOSE"
+        ok "в compose добавлен том /etc/letsencrypt"
+      fi
+    fi
+    if ! grep -q '/var/www/certbot:/var/www/certbot' "$COMPOSE"; then
+      if grep -q 'remnawave-nginx:' "$COMPOSE"; then
+        sed -i '/nginx.conf:\/etc\/nginx\/conf.d\/default.conf/a\      - /var/www/certbot:/var/www/certbot:ro' "$COMPOSE"
+      fi
+    fi
+    if ! grep -q 'remnawave-nginx:' "$COMPOSE"; then
+      cat >> "$COMPOSE" <<COMPOSE
+
+  remnawave-nginx:
+    image: ${NGINX_IMAGE}
+    container_name: remnawave-nginx
+    hostname: remnawave-nginx
+    restart: always
+    network_mode: host
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    logging:
+      driver: json-file
+      options: { max-size: 100m, max-file: "5" }
+    volumes:
+      - ./nginx-main.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - $WEBROOT:$WEBROOT:ro
+      - /var/www/certbot:/var/www/certbot:ro
+      - /dev/shm:/dev/shm:rw
+    command: sh -c 'rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
+COMPOSE
+      ok "сервис remnawave-nginx добавлен в compose"
+    fi
+  fi
+
+  XRAY443="$(ss -tlnpH 2>/dev/null | awk '$4 ~ /:443$/ {print}' | grep -iE 'xray|rw-core|remnanode' || true)"
+  if [ -n "$XRAY443" ]; then
+    warn "порт 443 сейчас держит Xray (Reality). Пока инбаунд в панели на :443,"
+    warn "nginx CDN не встанет — поставь XHTTP на 127.0.0.1:$CDN_XRAY_PORT и повтори."
+  fi
+
+  if [ -f "$COMPOSE" ]; then
+    (cd "$INSTALL_DIR" && docker compose up -d remnawave-nginx >/dev/null 2>&1) \
+      && ok "remnawave-nginx перезапущен" \
+      || err "не смог поднять remnawave-nginx"
+    sleep 2
+    if docker exec remnawave-nginx nginx -t >/dev/null 2>&1; then
+      ok "конфиг nginx валиден"
+    else
+      err "nginx -t не прошёл:"
+      docker exec remnawave-nginx nginx -t 2>&1 | sed 's/^/      /'
+    fi
+  fi
+
+  if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE ':443$'; then
+    ok "nginx слушает :443"
+  else
+    err "на :443 никто не слушает — CDN до origin не достучится"
+  fi
+  if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "127.0.0.1:${CDN_XRAY_PORT}\$"; then
+    ok "Xray слушает 127.0.0.1:$CDN_XRAY_PORT"
+  else
+    warn "Xray ещё не слушает 127.0.0.1:$CDN_XRAY_PORT — добавь инбаунд в панели"
+  fi
+
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow 443/tcp comment 'Yandex CDN origin' >/dev/null 2>&1 || true
+    ufw allow 80/tcp comment 'certbot' >/dev/null 2>&1 || true
+    # на эталоне 11443 был открыт снаружи зря: xray слушает только loopback
+    ufw --force delete allow 11443/tcp >/dev/null 2>&1 || true
+    ufw --force delete allow 11443/udp >/dev/null 2>&1 || true
+    ok "ufw: :443 открыт, :$CDN_XRAY_PORT снаружи закрыт"
+  fi
+
+  umask 077
+  cat > "$INSTALL_DIR/yandex-cdn.env" <<ENV
+CDN_ORIGIN=$CDN_ORIGIN
+CDN_PUBLIC=$CDN_PUBLIC
+CDN_PATH=$CDN_PATH
+CDN_XRAY_PORT=$CDN_XRAY_PORT
+CDN_EDGE_HEADER=$CDN_EDGE_HEADER
+CDN_EDGE_VALUE=$CDN_EDGE_VALUE
+ENV
+  chmod 600 "$INSTALL_DIR/yandex-cdn.env"
+  write_yandex_cdn_inbound
+  ok "состояние записано в $INSTALL_DIR/yandex-cdn.env"
+
+  say ""
+  print_yandex_cdn_help
+}
 
 # ставит WARP отдельным интерфейсом: маршрут по умолчанию не трогаем,
 # Xray сам привязывает к нему нужные соединения через sockopt.interface
@@ -614,12 +1118,20 @@ else
   printf "%b\n" "  ${R}xx${N}  порт панели $PORT НЕ слушается"
 fi
 if ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx 443; then
-  printf "%b\n" "  ${G}ok${N}  443 занят Xray"
+  if grep -qE 'upstream xray_xhttp|generated-by: node-setup yandex-cdn' /opt/remnanode/nginx.conf 2>/dev/null; then
+    printf "%b\n" "  ${G}ok${N}  443 занят nginx (Yandex CDN)"
+  else
+    printf "%b\n" "  ${G}ok${N}  443 занят Xray"
+  fi
 else
   printf "%b\n" "  ${Y}!!${N}  на 443 никто не слушает"
 fi
-[ -S /dev/shm/nginx.sock ]  && printf "%b\n" "  ${G}ok${N}  сокет nginx поднят" \
-                            || printf "%b\n" "  ${Y}!!${N}  сокета /dev/shm/nginx.sock нет"
+if grep -qE 'upstream xray_xhttp|generated-by: node-setup yandex-cdn' /opt/remnanode/nginx.conf 2>/dev/null; then
+  :
+else
+  [ -S /dev/shm/nginx.sock ]  && printf "%b\n" "  ${G}ok${N}  сокет nginx поднят" \
+                              || printf "%b\n" "  ${Y}!!${N}  сокета /dev/shm/nginx.sock нет"
+fi
 [ -S /dev/shm/xrxh.socket ] && printf "%b\n" "  ${G}ok${N}  сокет Xray поднят"
 if ipset list TG-BLOCK-V4 >/dev/null 2>&1; then
   if iptables -C INPUT -j TRAFFIC-GUARD 2>/dev/null; then
@@ -686,6 +1198,25 @@ fi
 
 if [ "$WARP_ONLY" = "1" ]; then
   install_warp
+  say ""
+  if [ -n "$FAILED" ]; then
+    bad "проблемы:$FAILED"
+    say "РЕЗУЛЬТАТ: с ошибками"
+    exit 1
+  fi
+  say "РЕЗУЛЬТАТ: ok"
+  exit 0
+fi
+
+if [ "$YANDEX_CDN_SHOW" = "1" ]; then
+  print_yandex_cdn_help
+  say ""
+  say "РЕЗУЛЬТАТ: ok"
+  exit 0
+fi
+
+if [ "$YANDEX_CDN_ONLY" = "1" ]; then
+  install_yandex_cdn
   say ""
   if [ -n "$FAILED" ]; then
     bad "проблемы:$FAILED"
@@ -821,7 +1352,20 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -aq --filter name=remn
     DOMAIN="$(grep -m1 -E '^[[:space:]]*server_name[[:space:]]+[A-Za-z0-9.-]+;' "$INSTALL_DIR/nginx.conf" \
               | sed -E 's/.*server_name[[:space:]]+//; s/;.*//')"
   fi
-  if [ -n "${DOMAIN:-}" ]; then
+  if cdn_mode; then
+    cdn_load_state || true
+    ok "режим Yandex CDN: origin ${CDN_ORIGIN:-?} → 127.0.0.1:${CDN_XRAY_PORT:-11443}${CDN_PATH:-}"
+    if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE ':443$'; then
+      ok "nginx (CDN origin) слушает :443"
+    else
+      bad "на :443 никто не слушает — CDN не достучится до origin"
+    fi
+    if [ -n "${CDN_XRAY_PORT:-}" ] && ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "127.0.0.1:${CDN_XRAY_PORT}\$"; then
+      ok "Xray слушает 127.0.0.1:$CDN_XRAY_PORT"
+    else
+      warn "XHTTP на loopback ещё не слушается — инбаунд в панели не доехал"
+    fi
+  elif [ -n "${DOMAIN:-}" ]; then
     check_panel_inbound
   fi
 

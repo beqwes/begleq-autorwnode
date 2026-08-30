@@ -153,12 +153,48 @@ bash node-setup.sh --bbr-only
 Пропустить в полном прогоне — `--no-bbr`. Текущее состояние видно в отчёте
 `--status-only` и в меню `begleq`.
 
+## Yandex CDN
+
+Отдельный пункт: нода становится origin для Yandex Cloud CDN, клиенты ходят
+на публичный домен, эджи бьют в origin на `:443`. Схема снята с живого прода
+(`origin.example.com` → `cdn.example.com`): nginx слушает 80/443, Xray —
+только `127.0.0.1:11443` с XHTTP `packet-up`. Reality self-steal на `:443`
+с этим режимом не совмещается.
+
+На уже настроенной ноде:
+
+```bash
+begleq          # пункт 11
+bash node-setup.sh --yandex-cdn
+bash node-setup.sh --yandex-cdn --cdn-origin origin.example --cdn-public cdn.example --yes
+```
+
+Скрипт спросит origin-домен, публичный домен, путь и порт Xray, выпустит
+сертификат Let's Encrypt на origin, перепишет nginx (буферизация и gzip
+выключены — иначе восходящий XHTTP рвётся), закроет `:11443` снаружи и
+положит готовый инбаунд в `/opt/remnanode/yandex-cdn-inbound.json`.
+
+По умолчанию origin закрывается заголовком `X-Cdn-Secret`: его же надо
+прописать в `staticRequestHeaders` ресурса CDN. Как на эталоне, без секрета:
+
+```bash
+bash node-setup.sh --yandex-cdn --cdn-open-origin
+```
+
+Инструкция для панели и консоли — пункт 12 или `--cdn-show`. Кратко:
+
+- A-запись origin → IP ноды, CNAME публичного домена → `provider_cname`
+- в консоли CDN: HTTPS к origin, Host = origin-домен, кеш/slice/Range выкл.,
+  query и cookie не выкидывать
+- хост в панели: `address` = тех-домен CDN, `host`/`sni` = публичный домен,
+  `xHttpExtraParams` = extra из инбаунда (панель сама не копирует)
+
 ## Меню настроек
 
 После установки на ноде появляется команда `begleq` — открывает меню из любого
 каталога: состояние ноды, повторная настройка, WARP включить/выключить/снести,
-BBR, исключения TrafficGuard, пересборка заглушки, обновление самого скрипта
-с гитхаба.
+BBR, исключения TrafficGuard, пересборка заглушки, Yandex CDN, обновление
+самого скрипта с гитхаба.
 
 ```bash
 begleq
