@@ -1844,13 +1844,48 @@ step "5/14  Docker"
 if command -v docker >/dev/null 2>&1; then
   ok "docker уже стоит: $(docker --version | awk '{print $3}' | tr -d ,)"
 else
-  say "  ставлю docker с get.docker.com…"
-  if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sh /tmp/get-docker.sh >/dev/null 2>&1; then
+  DLOG=/var/log/begleq-docker-install.log
+  : > "$DLOG"
+  # get.docker.com ставит docker-ce вместе с плагином compose. Иногда падает на
+  # apt-lock сразу после первой загрузки VDS (apt-daily) — даём вторую попытку.
+  for try in 1 2; do
+    say "  ставлю docker с get.docker.com (попытка $try)…"
+    if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>>"$DLOG" \
+       && sh /tmp/get-docker.sh >>"$DLOG" 2>&1 \
+       && command -v docker >/dev/null 2>&1; then
+      break
+    fi
+    sleep 3
+  done
+  # запасной путь: пакет дистрибутива (если download.docker.com недоступен)
+  if ! command -v docker >/dev/null 2>&1; then
+    warn "get.docker.com не сработал — ставлю docker.io из репозитория дистрибутива"
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq docker.io >>"$DLOG" 2>&1
+  fi
+  if command -v docker >/dev/null 2>&1; then
     ok "docker установлен: $(docker --version | awk '{print $3}' | tr -d ,)"
   else
-    err "docker не установился"
+    err "docker не установился — причина в $DLOG (последние строки):"
+    tail -n 8 "$DLOG" 2>/dev/null | while IFS= read -r l; do say "      $l"; done
   fi
   rm -f /tmp/get-docker.sh
+fi
+
+# compose v2: get.docker.com кладёт плагин сам; у docker.io его нет — доставим бинарь.
+# В репозитории Debian docker-compose-plugin отсутствует, поэтому берём с GitHub.
+if command -v docker >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+  say "  docker compose v2 не найден — доставляю плагин…"
+  apt-get install -y -qq docker-compose-plugin >/dev/null 2>&1
+  if ! docker compose version >/dev/null 2>&1; then
+    CLI_DIR=/usr/local/lib/docker/cli-plugins
+    mkdir -p "$CLI_DIR"
+    CB="docker-compose-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+    if curl -fsSL "https://github.com/docker/compose/releases/latest/download/$CB" \
+         -o "$CLI_DIR/docker-compose" 2>/dev/null && [ -s "$CLI_DIR/docker-compose" ]; then
+      chmod +x "$CLI_DIR/docker-compose"
+    fi
+  fi
 fi
 docker compose version >/dev/null 2>&1 && ok "docker compose v2 на месте" || err "нет docker compose v2 — нода не поднимется"
 systemctl enable --now docker >/dev/null 2>&1
