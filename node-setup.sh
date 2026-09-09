@@ -1751,6 +1751,18 @@ if [ "$DO_NGINX" = "1" ]; then
 fi
 
 ask PANEL_IP     "IP панели Remnawave (Enter — порт откроется всем)" ""
+
+# --- белый список TrafficGuard: чтобы свои же ноды/релеи не улетели в блок ---
+if [ "$DO_TG" = "1" ] && [ -z "$TG_ALLOW" ]; then
+  say ""
+  say "  Белый список TrafficGuard — адреса, которые никогда не блокируются."
+  say "  Сюда: IP других нод и релеев, свои админские IP. Иначе своя же нода,"
+  say "  попав в гос-/сканер-листы, окажется заблокирована (банки «не работают»)."
+  say "  IP панели (${PANEL_IP:-не задан}) и текущий SSH добавятся сами."
+  say "  Несколько — через запятую, можно CIDR. Enter — пропустить."
+  ask TG_ALLOW "IP в белый список TrafficGuard" ""
+fi
+
 ask NEW_HOSTNAME "Новое имя сервера (Enter — оставить $(hostname))" ""
 ask TIMEZONE     "Часовой пояс" "Europe/Moscow"
 
@@ -1759,6 +1771,7 @@ say "  ${CB}Итого:${C0}"
 say "     каталог     $INSTALL_DIR"
 say "     порт ноды   $NODE_PORT  (панель: ${PANEL_IP:-любой IP})"
 say "     SSH-порт    $SSH_PORT (для правила ufw)"
+[ "$DO_TG" = "1" ] && say "     TG-whitelist ${TG_ALLOW:-только панель и текущий SSH}"
 say "     ключ        ${SECRET_KEY:0:10}… (${#SECRET_KEY} симв.)"
 say "     имя сервера ${NEW_HOSTNAME:-$(hostname) — без изменений}"
 say "     часовой пояс $TIMEZONE"
@@ -1860,9 +1873,25 @@ step "6/14  Фаервол и fail2ban"
 # =============================================================================
 if [ "$DO_UFW" != "1" ]; then
   warn "ufw пропущен по флагу"
-elif ! command -v ufw >/dev/null 2>&1; then
-  warn "ufw не установлен"
 else
+  # ufw обязан быть до правил: если из базового набора не встал — доставим сейчас,
+  # с одним ретраем через apt update (частый случай на «голом» образе)
+  if ! command -v ufw >/dev/null 2>&1; then
+    say "  ufw не найден — доустанавливаю…"
+    apt-get install -y -qq ufw >/dev/null 2>&1
+  fi
+  if ! command -v ufw >/dev/null 2>&1; then
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq ufw >/dev/null 2>&1
+  fi
+fi
+
+if [ "$DO_UFW" != "1" ]; then
+  : # уже сообщили выше
+elif ! command -v ufw >/dev/null 2>&1; then
+  err "ufw не установлен и доустановить не удалось — фаервол не настроен"
+else
+  ok "ufw на месте"
   ufw allow "${SSH_PORT}/tcp" comment 'SSH' >/dev/null 2>&1
   # порт сменился — старое разрешение надо убрать, иначе останется открытым
   if [ -n "$OLD_PORT" ] && [ "$OLD_PORT" != "$NODE_PORT" ]; then
@@ -3093,41 +3122,166 @@ HTML
 
   cat > "$WEBROOT/assets/app.js" <<'JS'
 (function () {
-  var bar = document.querySelector('.bar i'), cur = document.querySelector('[data-cur]');
-  var tot = document.querySelector('[data-tot]'), ttl = document.querySelector('[data-np]');
-  var ch = document.querySelector('[data-ch]'), art = document.querySelector('[data-art]');
-  var pos = 8, len = 3600;
-  function secs(t) {
-    var p = t.split(':').map(Number);
-    return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + (p[1] || 0);
+  // ID трека берём прямо из обложки карточки: .../vi/<ID>/hqdefault.jpg
+  function idFromImg(img) {
+    if (!img) return '';
+    var m = /\/vi\/([^/]+)\//.exec(img.getAttribute('src') || '');
+    return m ? m[1] : '';
   }
+  var cards = [].slice.call(document.querySelectorAll('.tr'));
+  var list = cards.map(function (c) {
+    var im = c.querySelector('img');
+    return { id: idFromImg(im), t: c.getAttribute('data-t') || '',
+             c: c.getAttribute('data-c') || '', l: c.getAttribute('data-l') || '',
+             src: (im && im.src) || '', el: c };
+  }).filter(function (x) { return x.id; });
+
+  // плеер радио-блока (на /archive/ его нет — ниже подставим мини-панель)
+  var pl  = document.querySelector('.player');
+  var bar = document.querySelector('.bar i');
+  var cur = document.querySelector('[data-cur]');
+  var tot = document.querySelector('[data-tot]');
+  var ttl = document.querySelector('[data-np]');
+  var chE = document.querySelector('[data-ch]');
+  var art = document.querySelector('[data-art]');
+  var startId = idFromImg(art) || (list[0] && list[0].id) || '';
+
   function fmt(s) {
-    var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = Math.floor(s % 60);
+    s = Math.max(0, Math.floor(s || 0));
+    var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60;
     return (h ? h + ':' : '') + ((m < 10 && h ? '0' : '') + m) + ':' + ((r < 10 ? '0' : '') + r);
   }
-  if (tot) len = secs(tot.textContent);
-  setInterval(function () {
-    pos = (pos + 0.08) % 100;
-    if (bar) bar.style.width = pos.toFixed(2) + '%';
-    if (cur) cur.textContent = fmt(len * pos / 100);
-  }, 500);
-  document.querySelectorAll('.tr').forEach(function (c) {
-    c.addEventListener('click', function () {
-      if (ttl) ttl.textContent = c.getAttribute('data-t');
-      if (ch) ch.textContent = c.getAttribute('data-c');
-      if (art) art.src = c.querySelector('img').src;
-      if (tot) { tot.textContent = c.getAttribute('data-l'); len = secs(tot.textContent); }
-      pos = 0;
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  // эквалайзер «дышит» только когда реально играет
+  var eqSt = document.createElement('style');
+  eqSt.textContent = '.eq b{animation-play-state:paused}body.playing .eq b{animation-play-state:running}';
+  document.head.appendChild(eqSt);
+
+  // мини-панель для страниц без .player
+  var mini = null;
+  if (!pl && list.length) {
+    var st = document.createElement('style');
+    st.textContent = '#ytm{position:fixed;left:0;right:0;bottom:0;z-index:9999;display:flex;gap:12px;'
+      + 'align-items:center;padding:10px 16px;background:var(--card,#111);color:var(--fg,#eee);'
+      + 'border-top:1px solid var(--line,rgba(0,0,0,.15));font:13px system-ui,sans-serif}'
+      + '#ytm button{cursor:pointer;border:0;background:var(--acc,#3a7);color:#fff;width:34px;height:34px;'
+      + 'border-radius:50%;font-size:13px;flex:none}'
+      + '#ytm .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+      + '#ytm .p{flex:none;width:120px;height:3px;background:var(--line,rgba(0,0,0,.2))}'
+      + '#ytm .p i{display:block;height:100%;width:0;background:var(--acc,#3a7)}';
+    document.head.appendChild(st);
+    mini = document.createElement('div');
+    mini.id = 'ytm'; mini.hidden = true;
+    mini.innerHTML = '<button type="button">▶</button><div class="t"></div><div class="p"><i></i></div>';
+    document.body.appendChild(mini);
+    bar = mini.querySelector('.p i');
+    mini.querySelector('button').addEventListener('click', toggle);
+  }
+
+  // --- YouTube IFrame API ---
+  var player = null, ready = false, want = null, playing = false, curId = null;
+
+  function loadAPI() {
+    var box = document.createElement('div');
+    box.style.cssText = 'position:fixed;width:1px;height:1px;left:-9999px;top:-9999px;pointer-events:none';
+    var host = document.createElement('div'); host.id = 'yt-host';
+    box.appendChild(host); document.body.appendChild(box);
+    var s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  }
+  window.onYouTubeIframeAPIReady = function () {
+    player = new YT.Player('yt-host', {
+      height: '1', width: '1',
+      playerVars: { autoplay: 0, playsinline: 1, rel: 0 },
+      events: {
+        onReady: function () { ready = true; if (want) play(want); },
+        onStateChange: function (e) {
+          playing = (e.data === YT.PlayerState.PLAYING);
+          document.body.classList.toggle('playing', playing);
+          syncToggle();
+          if (e.data === YT.PlayerState.ENDED) next();
+        }
+      }
+    });
+  };
+
+  function meta(id) {
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  function setNP(m) {
+    if (!m) return;
+    if (ttl) ttl.textContent = m.t;
+    if (chE) chE.textContent = m.c;
+    if (art && m.src) art.src = m.src;
+    if (tot && m.l) tot.textContent = m.l;
+    if (mini) mini.querySelector('.t').textContent = (m.t || 'now playing') + (m.c ? ' — ' + m.c : '');
+  }
+  function play(id) {
+    if (!id) return;
+    curId = id; setNP(meta(id));
+    if (mini) mini.hidden = false;
+    if (!ready) { want = id; return; }
+    player.loadVideoById(id);
+  }
+  function next() {
+    if (!list.length) return;
+    var i = 0;
+    for (var k = 0; k < list.length; k++) if (list[k].id === curId) { i = k; break; }
+    play(list[(i + 1) % list.length].id);
+  }
+  function toggle() {
+    if (!ready) { if (startId) play(startId); return; }
+    if (playing) player.pauseVideo();
+    else if (curId) player.playVideo();
+    else play(startId);
+  }
+  function syncToggle() {
+    var b = mini && mini.querySelector('button');
+    if (b) b.textContent = playing ? '❚❚' : '▶';
+    if (pl) pl.setAttribute('data-playing', playing ? '1' : '0');
+  }
+
+  // клик по карточке — играть этот трек
+  list.forEach(function (m) {
+    m.el.style.cursor = 'pointer';
+    m.el.addEventListener('click', function (e) {
+      if (e.target.closest) { var a = e.target.closest('a'); if (a) e.preventDefault(); }
+      play(m.id);
+      if (pl) window.scrollTo({ top: 0, behavior: 'smooth' });
     });
   });
+  // клик по плееру — пауза/продолжение
+  if (pl) {
+    pl.style.cursor = 'pointer';
+    pl.addEventListener('click', function (e) {
+      if (e.target.closest && e.target.closest('.tr')) return;
+      toggle();
+    });
+  }
+
+  // прогресс из реального плеера
+  setInterval(function () {
+    if (!ready || !playing || !player.getDuration) return;
+    var d = player.getDuration() || 0, t = player.getCurrentTime() || 0;
+    if (d > 0) {
+      if (bar) bar.style.width = (t / d * 100).toFixed(2) + '%';
+      if (cur) cur.textContent = fmt(t);
+      if (tot) tot.textContent = fmt(d);
+    }
+  }, 500);
+
+  // счётчик прослушиваний
   try {
-    var k = 'l_' + new Date().toISOString().slice(0, 10);
-    var n = parseInt(localStorage.getItem(k) || '0', 10) + 1;
-    localStorage.setItem(k, String(n));
+    var key = 'l_' + new Date().toISOString().slice(0, 10);
+    var num = parseInt(localStorage.getItem(key) || '0', 10) + 1;
+    localStorage.setItem(key, String(num));
     var el = document.querySelector('[data-listens]');
-    if (el) el.textContent = n.toLocaleString('en-US');
+    if (el) el.textContent = num.toLocaleString('en-US');
   } catch (e) {}
+
+  if (list.length || startId) loadAPI();
 })();
 JS
 
