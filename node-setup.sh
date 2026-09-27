@@ -264,6 +264,17 @@ site_root() {
 
 has_cert() { [ -f "/etc/letsencrypt/live/$1/fullchain.pem" ]; }
 
+# адреса этого сервера: IPv4 на интерфейсах плюс внешний (api.ipify.org).
+# Сравнивать A-запись только с внешним нельзя: у сервера бывает несколько IP,
+# и наружу он ходит не с того, на который заходят (зашли на .99, а ipify
+# видит .2) — домен при этом настроен верно
+my_ips() {
+  { ip -4 -o addr show 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}'
+    [ -n "${1:-}" ] && printf '%s\n' "$1"; } | grep -v '^127\.' | awk '!s[$0]++' | tr '\n' ' ' | sed 's/ *$//'
+}
+# is_my_ip АДРЕС [ВНЕШНИЙ_IP]
+is_my_ip() { case " $(my_ips "${2:-}") " in *" $1 "*) return 0 ;; esac; return 1; }
+
 DOMAINS="$(norm_domains "$DOMAIN")"
 DOMAIN="${DOMAINS%% *}"
 
@@ -456,8 +467,8 @@ menu_add_sni() {
     res="$(getent ahostsv4 "$d" 2>/dev/null | awk 'NR==1{print $1}')"
     if [ -z "$res" ]; then
       bad "$d не резолвится — сертификат не выпустится, пока нет A-записи"
-    elif [ -n "$ip" ] && [ "$res" != "$ip" ]; then
-      bad "$d указывает на $res, а сервер $ip (если домен за Cloudflare — выключи оранжевое облако)"
+    elif [ -n "$ip" ] && ! is_my_ip "$res" "$ip"; then
+      bad "$d указывает на $res, а у сервера адреса: $(my_ips "$ip") (если домен за Cloudflare — выключи оранжевое облако)"
     else
       ok "DNS: $d → $res"
     fi
@@ -869,8 +880,8 @@ install_yandex_cdn() {
   MY_IP="$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null)"
   if [ -z "$RESOLVED" ]; then
     warn "$CDN_ORIGIN не резолвится — сертификат не выпустится, пока не появится A-запись"
-  elif [ -n "$MY_IP" ] && [ "$RESOLVED" != "$MY_IP" ]; then
-    warn "$CDN_ORIGIN указывает на $RESOLVED, а сервер $MY_IP — сертификат не выпустится"
+  elif [ -n "$MY_IP" ] && ! is_my_ip "$RESOLVED" "$MY_IP"; then
+    warn "$CDN_ORIGIN указывает на $RESOLVED, а у сервера адреса: $(my_ips "$MY_IP") — сертификат не выпустится"
   else
     ok "DNS: $CDN_ORIGIN → ${RESOLVED:-$MY_IP}"
   fi
@@ -1877,8 +1888,8 @@ if [ "$DO_NGINX" = "1" ]; then
       RESOLVED="$(getent ahostsv4 "$d" 2>/dev/null | awk 'NR==1{print $1}')"
       if [ -z "$RESOLVED" ]; then
         warn "$d не резолвится — сертификат не выпустится, пока не появится A-запись"
-      elif [ -n "$MY_IP" ] && [ "$RESOLVED" != "$MY_IP" ]; then
-        warn "$d указывает на $RESOLVED, а сервер $MY_IP — сертификат не выпустится"
+      elif [ -n "$MY_IP" ] && ! is_my_ip "$RESOLVED" "$MY_IP"; then
+        warn "$d указывает на $RESOLVED, а у сервера адреса: $(my_ips "$MY_IP") — сертификат не выпустится"
       else
         ok "DNS: $d → $RESOLVED"
       fi
