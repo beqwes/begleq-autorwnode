@@ -243,9 +243,16 @@ norm_domains() {
     | grep -v '^$' | awk '!s[$0]++' | tr '\n' ' ' | sed 's/ *$//'
 }
 
-# self-steal домены из уже записанного nginx.conf — для отчёта и повторного
-# запуска. Берём только блоки с одним именем: у блока на :80 их список и «_»
+# настроенные self-steal домены — для отчёта, меню и повторного запуска.
+# Список хранится в $INSTALL_DIR/domains: в nginx.conf попадают только домены
+# с сертификатом, и по нему одному невыпущенный домен потерялся бы. Для нод,
+# поставленных до этого файла, читаем nginx.conf — блоки с одним именем
+# (у блока на :80 их список и «_»)
 conf_domains() {
+  if [ -s "$INSTALL_DIR/domains" ]; then
+    norm_domains "$(cat "$INSTALL_DIR/domains")"
+    return 0
+  fi
   grep -E '^[[:space:]]*server_name[[:space:]]+[A-Za-z0-9.-]+;' "$INSTALL_DIR/nginx.conf" 2>/dev/null \
     | sed -E 's/.*server_name[[:space:]]+//; s/;.*//' | awk '!s[$0]++' | tr '\n' ' ' | sed 's/ *$//'
 }
@@ -345,6 +352,8 @@ menu_main() {
     say " 10) обновить сам скрипт с гитхаба"
     say " 11) Yandex CDN: настроить origin"
     say " 12) Yandex CDN: инструкция для панели и консоли"
+    say " 13) SNI: добавить домен"
+    say " 14) SNI: убрать домен"
     say "  0) выход"
     say ""
     printf '%b' "${CC}?${C0} выбор: "
@@ -376,7 +385,7 @@ menu_main() {
             printf '%s\n' "$ALL_PRESETS_HINT" | fold -s -w 76 | sed 's/^/    /'
             printf '%b' "${CC}?${C0} стиль (Enter — случайный): "
             IFS= read -r st < "$TTY_IN"
-            bash "$SELF" --no-status --no-upgrade --no-swap --no-traffic-guard --no-motd --no-warp \
+            bash "$SELF" --no-status --no-upgrade --no-swap --no-ufw --no-fail2ban --no-traffic-guard --no-motd --no-warp \
                  --domain "$D" --force-site ${st:+--site-theme "$st"} --yes
           fi ;;
       9)  if [ -f "$INSTALL_DIR/warp-outbound.json" ]; then
@@ -396,6 +405,8 @@ menu_main() {
           fi ;;
       11) bash "$SELF" --yandex-cdn ;;
       12) bash "$SELF" --cdn-show ;;
+      13) menu_add_sni ;;
+      14) menu_del_sni ;;
       0|q|"") say "пока"; return 0 ;;
       *)  warn "нет такого пункта" ;;
     esac
@@ -403,6 +414,90 @@ menu_main() {
     printf '%b' "${CC}Enter${C0} — назад в меню "
     IFS= read -r _ < "$TTY_IN"
   done
+}
+
+# перенастроить ноду под новый список доменов: сертификаты, сайты, nginx.
+# Фаервол, пакеты и прочее не трогаем: ufw в таком прогоне не знает IP панели
+# и открыл бы порт ноды всем
+sni_apply() {
+  bash "$SELF" --no-status --no-upgrade --no-swap --no-ufw --no-fail2ban --no-bbr \
+       --no-traffic-guard --no-motd --no-warp --domain "$(printf '%s' "$1" | tr ' ' ',')" --yes
+}
+
+menu_add_sni() {
+  local cur nd new d ip res
+  cur="$(conf_domains)"
+  if [ -z "$cur" ]; then
+    warn "домены ещё не настроены — сначала пункт 2"
+    return 0
+  fi
+  local nocert=""
+  for d in $cur; do has_cert "$d" || nocert="$nocert $d"; done
+  say "  сейчас: $cur"
+  [ -n "$nocert" ] && say "  без сертификата:$nocert — Enter, чтобы попробовать выпустить снова"
+  say "  A-запись нового домена должна уже вести на этот сервер."
+  printf '%b' "${CC}?${C0} новый домен (можно несколько через запятую): "
+  IFS= read -r nd < "$TTY_IN"
+  [ -z "$nd" ] && nd="$nocert"
+  new=""
+  for d in $(norm_domains "$nd"); do
+    case " $cur " in *" $d "*)
+      if has_cert "$d"; then warn "$d уже есть"; continue; fi
+      warn "$d уже в списке, но без сертификата — выпускаю заново" ;;
+    esac
+    printf '%s' "$d" | grep -qE '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$' || { bad "не похоже на домен: $d"; continue; }
+    new="$new $d"
+  done
+  [ -n "$new" ] || { warn "нечего добавлять"; return 0; }
+
+  # DNS проверяем до certbot: Let's Encrypt ограничивает число неудачных попыток
+  ip="$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null)"
+  for d in $new; do
+    res="$(getent ahostsv4 "$d" 2>/dev/null | awk 'NR==1{print $1}')"
+    if [ -z "$res" ]; then
+      bad "$d не резолвится — сертификат не выпустится, пока нет A-записи"
+    elif [ -n "$ip" ] && [ "$res" != "$ip" ]; then
+      bad "$d указывает на $res, а сервер $ip (если домен за Cloudflare — выключи оранжевое облако)"
+    else
+      ok "DNS: $d → $res"
+    fi
+  done
+
+  # Let's Encrypt проверяет домен по :80, клиенты ходят на :443
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw allow 80/tcp comment 'certbot' >/dev/null 2>&1
+    ufw allow 443/tcp comment 'VPN tls' >/dev/null 2>&1
+    ok "ufw: 80/tcp и 443/tcp открыты"
+  fi
+  say "  фаервол у хостера (панель провайдера) скрипт открыть не может — там 80 и 443 тоже должны быть открыты"
+
+  confirm "Добавить:$new?" y || { warn "отменено"; return 0; }
+  sni_apply "$(norm_domains "$cur $new")"
+  say ""
+  say "  в панели: добавь$new в serverNames инбаунда Reality и заведи по хосту на домен (sni = домен)"
+}
+
+menu_del_sni() {
+  local cur main rest d x n=0 pick
+  cur="$(conf_domains)"
+  main="${cur%% *}"
+  rest="${cur#"$main"}"
+  if [ -z "${rest# }" ]; then
+    warn "дополнительных доменов нет — убирать нечего (основной меняется через пункт 2)"
+    return 0
+  fi
+  say "  основной: $main (его не убрать — на нём сайт в $WEBROOT и сертификат Hysteria2)"
+  for d in $rest; do n=$((n + 1)); say "  $n) $d"; done
+  printf '%b' "${CC}?${C0} какой убрать (номер): "
+  IFS= read -r pick < "$TTY_IN"
+  n=0; d=""
+  for x in $rest; do n=$((n + 1)); [ "$n" = "$pick" ] && d="$x"; done
+  [ -n "$d" ] || { warn "нет такого номера"; return 0; }
+  confirm "Убрать $d из nginx? (сертификат и сайт останутся на диске)" n || { warn "отменено"; return 0; }
+  # shellcheck disable=SC2086  # список доменов разбиваем на строки
+  sni_apply "$(printf '%s\n' $cur | grep -vxF "$d" | tr '\n' ' ')"
+  say ""
+  say "  в панели: убери $d из serverNames инбаунда и его хост"
 }
 
 # ставит команду begleq, чтобы меню открывалось откуда угодно
@@ -2053,6 +2148,12 @@ else
        && grep -q 'acme-challenge' "$INSTALL_DIR/nginx.conf" 2>/dev/null && [ -d /var/www/certbot ]; then
       CB_ARGS=(--webroot -w /var/www/certbot)
     else
+      # nginx, который крутится в перезапусках, то и дело хватает :80 —
+      # standalone-certbot тогда не может его занять. Останавливаем, шаг 10
+      # поднимет его обратно уже с исправленным конфигом
+      if [ -n "$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)" ]; then
+        docker stop remnawave-nginx >/dev/null 2>&1 && warn "nginx не работал — остановил его на время выпуска сертификата"
+      fi
       # :80 в этой схеме свободен — Xray держит только :443, nginx сидит на сокете
       BUSY80="$(ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -x 80 | head -1)"
       [ -n "$BUSY80" ] && warn "порт 80 кем-то занят — certbot может не пройти"
@@ -3575,9 +3676,12 @@ fi
 # =============================================================================
 step "9/14  nginx"
 # =============================================================================
-if [ "$DO_NGINX" != "1" ]; then
-  warn "пропущено: домен не задан"
-else
+# пишет nginx.conf по доменам с сертификатом; зовётся и повторно — когда
+# недостающий сертификат выпустился уже через поднятый nginx
+write_nginx_conf() {
+  mkdir -p "$INSTALL_DIR"
+  # shellcheck disable=SC2086  # по домену на строку
+  printf '%s\n' $DOMAINS > "$INSTALL_DIR/domains"
   [ -f "$INSTALL_DIR/nginx.conf" ] && { cp -a "$INSTALL_DIR/nginx.conf" "$INSTALL_DIR/nginx.conf.bak.$STAMP"; ok "бэкап nginx.conf"; }
 
   # server-блок заглушки одного домена: $1 домен, $2 listen, $3 = 1 — реальный
@@ -3636,14 +3740,16 @@ BLOCK
   }
 
   # в конфиг идут только домены с сертификатом: nginx без файла сертификата
-  # не стартует вовсе и уронил бы заглушку на всех доменах сразу. Основной
-  # домен оставляем всегда — как и раньше, nginx поднимется, когда он выпустится
+  # не стартует вовсе — уходит в перезапуск по кругу, роняет заглушку на всех
+  # доменах и дёргает :80, из-за чего certbot не может выпустить сертификат и
+  # в следующий раз. Без сертификатов nginx всё равно поднимется: блок-отбойник
+  # (ssl_reject_handshake) сертификата не требует, а :80 отдаёт ACME-челлендж
   NG_DOMAINS=""
   for d in $DOMAINS; do
-    if [ "$d" = "$DOMAIN" ] || has_cert "$d"; then
+    if has_cert "$d"; then
       NG_DOMAINS="$NG_DOMAINS $d"
     else
-      err "сертификата для $d нет — в nginx его не добавляю, перезапусти скрипт после выпуска"
+      err "сертификата для $d нет — в nginx его не добавляю; когда A-запись и :80 будут в порядке: begleq → 13 → Enter"
     fi
   done
   NG_DOMAINS="${NG_DOMAINS# }"
@@ -3724,7 +3830,7 @@ server {
 NGINX
     ok "заглушка также слушает 127.0.0.1:$FALLBACK_PORT (для dest вида 127.0.0.1:$FALLBACK_PORT)"
   fi
-  ok "nginx.conf записан (домены: $NG_DOMAINS; XHTTP $XHTTP_PATH → /dev/shm/xrxh.socket; WS $WS_PATH → $WS_SOCKET)"
+  ok "nginx.conf записан (домены: ${NG_DOMAINS:-нет}; XHTTP $XHTTP_PATH → /dev/shm/xrxh.socket; WS $WS_PATH → $WS_SOCKET)"
   say "     инбаунды в панели для этой ноды (Xray подхватит сокеты из /dev/shm):"
   # shellcheck disable=SC2086  # список доменов нужно разбить на слова
   SN_JSON="$(printf '"%s", ' $NG_DOMAINS | sed 's/, $//')"
@@ -3733,9 +3839,14 @@ NGINX
   say "       • VLESS XHTTP   — path=$XHTTP_PATH; listen unix:/dev/shm/xrxh.socket"
   say "       • VLESS WS+TLS  — network=ws, path=$WS_PATH; listen unix:$WS_SOCKET (nginx терминирует TLS)"
   say "       • Hysteria2     — UDP :443$([ "${HYSTERIA_PORT:-0}" != "0" ] && echo " и :$HYSTERIA_PORT"); cert /etc/letsencrypt/live/$DOMAIN/{fullchain,privkey}.pem"
-  if ! [ -f "$CERT_DIR/fullchain.pem" ]; then
-    warn "сертификата ещё нет — nginx будет падать по кругу, пока он не появится"
-  fi
+  [ -z "$NG_DOMAINS" ] && warn "ни у одного домена нет сертификата — nginx поднимется только с :80 для их выпуска"
+  return 0
+}
+
+if [ "$DO_NGINX" != "1" ]; then
+  warn "пропущено: домен не задан"
+else
+  write_nginx_conf
 fi
 
 # =============================================================================
@@ -3842,7 +3953,7 @@ COMPOSE
   # nginx мог крутиться в цикле падений, пока сертификата ещё не было: docker
   # наращивает паузу между попытками, и сам он поднимется нескоро. Раз сертификат
   # уже на месте — перезапускаем принудительно и ждём, пока встанет
-  if [ "$DO_NGINX" = "1" ] && [ -f "$CERT_DIR/fullchain.pem" ]; then
+  if [ "$DO_NGINX" = "1" ]; then
     NG_STATE="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
     if [ "$NG_STATE" != "running" ]; then
       docker restart remnawave-nginx >/dev/null 2>&1
@@ -3895,12 +4006,12 @@ if [ "$DO_NGINX" = "1" ]; then
   NG_STATE="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
   if [ "$NG_STATE" != "running" ]; then
     err "nginx не работает (состояние: ${NG_STATE:-нет контейнера}), из логов:"
-    docker logs --tail 40 remnawave-nginx 2>&1 | tr -d '\000' | grep -iE 'emerg|error' \
-      | tail -2 | cut -c1-200 | sed 's/^/      /'
-    if ! [ -f "$CERT_DIR/fullchain.pem" ]; then
-      say "      сертификата ${CERT_DIR}/fullchain.pem нет — сначала выпусти его,"
-      say "      затем перезапусти: cd $INSTALL_DIR && docker compose up -d"
-    fi
+    NG_LOG="$(docker logs --tail 40 remnawave-nginx 2>&1 | tr -d '\000')"
+    # emerg в логе может и не быть (контейнер только что перезапущен) — тогда
+    # показываем хвост как есть, а не пустоту
+    { printf '%s\n' "$NG_LOG" | grep -iE 'emerg|error' || printf '%s\n' "$NG_LOG"; } \
+      | tail -3 | cut -c1-200 | sed 's/^/      /'
+    say "      перезапуск: cd $INSTALL_DIR && docker compose up -d"
   elif docker exec remnawave-nginx nginx -t >/dev/null 2>&1; then
     ok "конфиг nginx валиден"
     # на повторном запуске контейнер не пересоздаётся, а конфиг мог поменяться
@@ -3918,6 +4029,32 @@ if [ "$DO_NGINX" = "1" ]; then
     ok "сокет Xray /dev/shm/xrxh.socket на месте"
   else
     warn "сокета /dev/shm/xrxh.socket ещё нет — появится, когда панель привяжет inbound к ноде"
+  fi
+
+  # сертификат не выпустился на шаге 7 (nginx крутился в перезапусках, :80 был
+  # занят) — теперь nginx поднят и сам отдаёт ACME-челлендж на :80: пробуем
+  # ещё раз через webroot и сразу подключаем домен в nginx
+  LATE=""
+  if [ "$NG_STATE" = "running" ] && [ -d /var/www/certbot ] && command -v certbot >/dev/null 2>&1; then
+    for d in $DOMAINS; do
+      has_cert "$d" && continue
+      if certbot certonly --webroot -w /var/www/certbot -n --agree-tos -m "$EMAIL" --cert-name "$d" -d "$d" >/dev/null 2>&1; then
+        ok "сертификат для $d выпущен со второй попытки (через webroot)"
+        LATE="$LATE $d"
+      else
+        err "сертификат для $d так и не выпустился: проверь, что A-запись $d ведёт на этот сервер"
+        say "      и что порт 80 открыт снаружи (фаервол хостера тоже): curl -I http://$d/.well-known/acme-challenge/x"
+      fi
+    done
+  fi
+  if [ -n "$LATE" ]; then
+    write_nginx_conf
+    if docker exec remnawave-nginx nginx -t >/dev/null 2>&1; then
+      docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1 && ok "nginx перечитал конфиг: подключены$LATE"
+    else
+      err "nginx -t после добавления$LATE не прошёл:"
+      docker exec remnawave-nginx nginx -t 2>&1 | sed 's/^/      /'
+    fi
   fi
 
   for d in ${NG_DOMAINS:-$DOMAINS}; do
