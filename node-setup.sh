@@ -37,8 +37,11 @@ LAST_COUNT="${LAST_COUNT:-10}"
 NODE_IMAGE="${NODE_IMAGE:-}"
 NODE_IMAGE_DEFAULT="remnawave/node:3.2.2"
 NGINX_IMAGE="${NGINX_IMAGE:-nginx:1.28}"
-# self-steal домен: под него выпускается сертификат и ставится сайт-заглушка
+# self-steal домены: под каждый выпускается свой сертификат и ставится свой
+# сайт-заглушка. --domain a.com,b.com — первый основной (сайт в $WEBROOT,
+# его сертификат берёт Hysteria2), остальные живут в $SITES_ROOT/<домен>
 DOMAIN="${DOMAIN:-}"
+DOMAINS=""
 EMAIL="${EMAIL:-}"
 SITE_THEME="${SITE_THEME:-}"
 XHTTP_PATH="${XHTTP_PATH:-/api/v3/media}"
@@ -55,6 +58,7 @@ HYSTERIA_PORT="${HYSTERIA_PORT:-0}"
 # либо unix-сокет, либо 127.0.0.1:9443 — поэтому слушаем оба варианта сразу
 FALLBACK_PORT="${FALLBACK_PORT:-9443}"
 WEBROOT="${WEBROOT:-/var/www/html}"
+SITES_ROOT="${SITES_ROOT:-/var/www/sites}"
 DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; DO_TG=1; DO_WARP=1; DO_BBR=1
 # TrafficGuard: списки сканеров и госсетей. Белый список важнее блок-листа —
 # иначе панель или соседняя нода попадут под раздачу
@@ -88,16 +92,20 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --node-port <port>   порт связи с панелью (по умолчанию 2222, спросит при запуске)
   --node-version <tag> версия образа ноды, например 3.2.2 или latest
   --node-image <ref>   образ целиком, если нужен свой реестр
-  --domain <host>      self-steal домен ноды: сертификат, nginx и сайт-заглушка
+  --domain <host>      self-steal домен ноды: сертификат, nginx и сайт-заглушка.
+                       Несколько SNI — через запятую или повтором флага:
+                       --domain a.com,b.com,c.com (у каждого свой сертификат
+                       и свой сайт; первый — основной)
   --email <mail>       почта для Let's Encrypt (по умолчанию admin@домен)
   --xhttp-path <path>  путь, который nginx отдаёт Xray (по умолчанию /api/v3/media)
   --ws-path <path>     путь nginx→Xray для VLESS+WS+TLS (по умолчанию /api/v2/gateway)
   --hysteria-port <p>  доп. UDP-порт/диапазон под Hysteria2 (443/udp открыт всегда;
                        пример: 8443 или 20000:50000 для port-hopping)
   --fallback-port <p>  локальный порт для dest у Reality (по умолчанию 9443, 0 — выключить)
-  --site-theme <t>     стиль заглушки: breakcore, lofi, dnb, synthwave, phonk,
-                       ambient (по умолчанию случайный)
-  --force-site         перезаписать уже существующий сайт в /var/www/html
+  --site-theme <t>     стиль заглушки основного домена: nexora, kanso, dustline…
+                       (весь список — в меню begleq; по умолчанию случайный;
+                       остальным доменам стили подбираются сами, без повторов)
+  --force-site         перезаписать уже существующие сайты-заглушки
   --no-nginx           не ставить nginx и не выпускать сертификат
   --no-site            не трогать сайт-заглушку
   --tg-allow <ips>     исключения TrafficGuard: IP панели, других нод, свои
@@ -145,7 +153,7 @@ while [ $# -gt 0 ]; do
     --node-port)   NODE_PORT="${2:-}"; shift 2;;
     --node-version) NODE_IMAGE="remnawave/node:${2:-}"; shift 2;;
     --node-image)  NODE_IMAGE="${2:-}"; shift 2;;
-    --domain)      DOMAIN="${2:-}"; shift 2;;
+    --domain)      DOMAIN="${DOMAIN:+$DOMAIN,}${2:-}"; shift 2;;
     --email)       EMAIL="${2:-}"; shift 2;;
     --xhttp-path)  XHTTP_PATH="${2:-}"; shift 2;;
     --ws-path)     WS_PATH="${2:-}"; shift 2;;
@@ -229,6 +237,29 @@ confirm() {   # confirm "вопрос" y|n
   case "$a" in [yYдД]*) return 0;; *) return 1;; esac
 }
 
+# «A.com, b.com;c.com» → «a.com b.com c.com»: нижний регистр, без повторов
+norm_domains() {
+  printf '%s\n' "$*" | tr '[:upper:]' '[:lower:]' | tr ',;\t' '   ' | tr -s ' ' '\n' | sed -E 's|^https?://||; s|/.*||; s|\.$||' \
+    | grep -v '^$' | awk '!s[$0]++' | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# self-steal домены из уже записанного nginx.conf — для отчёта и повторного
+# запуска. Берём только блоки с одним именем: у блока на :80 их список и «_»
+conf_domains() {
+  grep -E '^[[:space:]]*server_name[[:space:]]+[A-Za-z0-9.-]+;' "$INSTALL_DIR/nginx.conf" 2>/dev/null \
+    | sed -E 's/.*server_name[[:space:]]+//; s/;.*//' | awk '!s[$0]++' | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# где лежит сайт-заглушка домена: у основного — $WEBROOT, как и раньше
+site_root() {
+  if [ "$1" = "$DOMAIN" ]; then printf '%s' "$WEBROOT"; else printf '%s/%s' "$SITES_ROOT" "$1"; fi
+}
+
+has_cert() { [ -f "/etc/letsencrypt/live/$1/fullchain.pem" ]; }
+
+DOMAINS="$(norm_domains "$DOMAIN")"
+DOMAIN="${DOMAINS%% *}"
+
 # сверяем то, что панель реально отдала ядру, с тем, что настроено на ноде:
 # сайт-заглушку показывает Xray, а не nginx, поэтому SNI и dest должны сойтись
 check_panel_inbound() {
@@ -252,13 +283,16 @@ check_panel_inbound() {
 
   say "  инбаунд из панели: SNI [${names:-нет}] → dest [${dests:-нет}]"
 
-  case " $names " in
-    *" $DOMAIN "*) ok "домен $DOMAIN есть в serverNames инбаунда" ;;
-    *)
-      err "домена $DOMAIN нет в serverNames инбаунда — Reality рвёт чужой SNI, заглушка не покажется"
-      say "      в панели: инбаунд этой ноды → serverNames должен содержать $DOMAIN"
-      ;;
-  esac
+  local d
+  for d in ${DOMAINS:-$DOMAIN}; do
+    case " $names " in
+      *" $d "*) ok "домен $d есть в serverNames инбаунда" ;;
+      *)
+        err "домена $d нет в serverNames инбаунда — Reality рвёт чужой SNI, заглушка не покажется"
+        say "      в панели: инбаунд этой ноды → serverNames должен содержать $d"
+        ;;
+    esac
+  done
 
   local dest_ok=0
   case " $dests " in
@@ -334,8 +368,7 @@ menu_main() {
           else
             warn "TrafficGuard не установлен — поставится при пункте 2"
           fi ;;
-      8)  D="$(grep -m1 -E '^[[:space:]]*server_name[[:space:]]+[A-Za-z0-9.-]+;' "$INSTALL_DIR/nginx.conf" 2>/dev/null \
-               | sed -E 's/.*server_name[[:space:]]+//; s/;.*//')"
+      8)  D="$(conf_domains | tr ' ' ',')"
           if [ -z "$D" ]; then
             warn "домен не найден — сначала настрой ноду (пункт 2)"
           else
@@ -1428,8 +1461,8 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -aq --filter name=remn
 
   # сверка с панелью: домен берём из уже лежащего nginx.conf, если не задан флагом
   if [ -z "${DOMAIN:-}" ] && [ -f "$INSTALL_DIR/nginx.conf" ]; then
-    DOMAIN="$(grep -m1 -E '^[[:space:]]*server_name[[:space:]]+[A-Za-z0-9.-]+;' "$INSTALL_DIR/nginx.conf" \
-              | sed -E 's/.*server_name[[:space:]]+//; s/;.*//')"
+    DOMAINS="$(conf_domains)"
+    DOMAIN="${DOMAINS%% *}"
   fi
   if cdn_mode; then
     cdn_load_state || true
@@ -1717,35 +1750,53 @@ esac
 
 # --- домен self-steal: он же для сертификата и сайта-заглушки ---
 if [ "$DO_NGINX" = "1" ]; then
+  # на повторном запуске предлагаем то, что уже настроено: Enter оставит как было
+  OLD_DOMAINS="$(conf_domains | tr ' ' ',')"
   if [ -z "$DOMAIN" ]; then
     say ""
     say "  Домен ноды нужен для сертификата, nginx и сайта-заглушки."
-    say "  A-запись должна уже указывать на этот сервер. Enter — пропустить,"
-    say "  тогда поднимется только нода без nginx и заглушки."
+    say "  A-запись должна уже указывать на этот сервер. Можно несколько"
+    say "  доменов через запятую — каждый станет отдельным SNI со своим"
+    say "  сертификатом и своим сайтом; первый — основной."
+    if [ -n "$OLD_DOMAINS" ]; then
+      say "  Enter — оставить как есть ($OLD_DOMAINS), «-» — без nginx и заглушки."
+    else
+      say "  Enter — пропустить, тогда поднимется только нода без nginx и заглушки."
+    fi
   fi
-  ask DOMAIN "Домен ноды (self-steal)" ""
+  ask DOMAIN "Домены ноды (self-steal), через запятую" "$OLD_DOMAINS"
+  [ "$DOMAIN" = "-" ] && DOMAIN=""
+  DOMAINS="$(norm_domains "$DOMAIN")"
+  DOMAIN="${DOMAINS%% *}"
+  for d in $DOMAINS; do
+    printf '%s' "$d" | grep -qE '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$' || die "не похоже на домен: $d"
+  done
   if [ -z "$DOMAIN" ]; then
     DO_NGINX=0
     warn "домен не задан — nginx, сертификат и сайт пропускаются"
   else
+    [ "$DOMAINS" != "$DOMAIN" ] && ok "доменов: $(printf '%s\n' "$DOMAINS" | wc -w) — основной $DOMAIN, дополнительные: ${DOMAINS#* }"
     ask EMAIL "Почта для Let's Encrypt" "admin@$DOMAIN"
-    RESOLVED="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')"
     MY_IP="$(curl -s --max-time 6 https://api.ipify.org 2>/dev/null)"
-    if [ -z "$RESOLVED" ]; then
-      warn "$DOMAIN не резолвится — сертификат не выпустится, пока не появится A-запись"
-    elif [ -n "$MY_IP" ] && [ "$RESOLVED" != "$MY_IP" ]; then
-      warn "$DOMAIN указывает на $RESOLVED, а сервер $MY_IP — сертификат не выпустится"
-    else
-      ok "DNS: $DOMAIN → $RESOLVED"
-    fi
-    # тема заглушки: если не задана — берём случайную
+    for d in $DOMAINS; do
+      RESOLVED="$(getent ahostsv4 "$d" 2>/dev/null | awk 'NR==1{print $1}')"
+      if [ -z "$RESOLVED" ]; then
+        warn "$d не резолвится — сертификат не выпустится, пока не появится A-запись"
+      elif [ -n "$MY_IP" ] && [ "$RESOLVED" != "$MY_IP" ]; then
+        warn "$d указывает на $RESOLVED, а сервер $MY_IP — сертификат не выпустится"
+      else
+        ok "DNS: $d → $RESOLVED"
+      fi
+    done
+    # тема заглушки: если не задана — берём случайную. Старые названия жанров
+    # (breakcore, lofi…) тоже принимаются — по ним выберется случайный пресет
     if [ -z "$SITE_THEME" ]; then
       SITE_THEME="$(shuf -e breakcore lofi dnb synthwave phonk ambient -n 1 2>/dev/null || echo lofi)"
       ok "тема сайта-заглушки выбрана случайно: $SITE_THEME"
     fi
-    case "$SITE_THEME" in
-      breakcore|lofi|dnb|synthwave|phonk|ambient|random) : ;;
-      *) die "неизвестная тема: $SITE_THEME (breakcore|lofi|dnb|synthwave|phonk|ambient|random)";;
+    case " $ALL_PRESETS_HINT breakcore lofi dnb synthwave phonk ambient random " in
+      *" $SITE_THEME "*) : ;;
+      *) die "неизвестная тема: $SITE_THEME (варианты: $ALL_PRESETS_HINT)";;
     esac
   fi
 fi
@@ -1981,17 +2032,38 @@ step "7/14  Сертификат Let's Encrypt"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 if [ "$DO_NGINX" != "1" ]; then
   warn "пропущено: домен не задан"
-elif [ -f "$CERT_DIR/fullchain.pem" ]; then
-  ok "сертификат уже есть, годен до $(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
 else
-  command -v certbot >/dev/null 2>&1 || apt-get install -y -qq certbot >/dev/null 2>&1
-  # :80 в этой схеме свободен — Xray держит только :443, nginx сидит на сокете
-  BUSY80="$(ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -x 80 | head -1)"
-  [ -n "$BUSY80" ] && warn "порт 80 кем-то занят — certbot может не пройти"
-  if certbot certonly --standalone -n --agree-tos -m "$EMAIL" -d "$DOMAIN" >/dev/null 2>&1; then
-    ok "сертификат выпущен для $DOMAIN"
-  else
-    err "certbot не выпустил сертификат для $DOMAIN (проверь A-запись и что :80 доступен снаружи)"
+  # у каждого домена свой сертификат, а не один на все: в общем сертификате
+  # (и в логах Certificate Transparency) домены видны списком — заблокируют
+  # один, по сертификату сразу найдут остальные
+  NEED_CERT=""
+  for d in $DOMAINS; do
+    if has_cert "$d"; then
+      ok "сертификат $d уже есть, годен до $(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$d/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+    else
+      NEED_CERT="$NEED_CERT $d"
+    fi
+  done
+  if [ -n "$NEED_CERT" ]; then
+    command -v certbot >/dev/null 2>&1 || apt-get install -y -qq certbot >/dev/null 2>&1
+    # на повторном запуске :80 уже держит наш nginx и отдаёт ACME-челлендж —
+    # тогда standalone упал бы, выпускаем через webroot без остановки nginx
+    CB_ARGS=(--standalone)
+    if [ "$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)" = "running" ] \
+       && grep -q 'acme-challenge' "$INSTALL_DIR/nginx.conf" 2>/dev/null && [ -d /var/www/certbot ]; then
+      CB_ARGS=(--webroot -w /var/www/certbot)
+    else
+      # :80 в этой схеме свободен — Xray держит только :443, nginx сидит на сокете
+      BUSY80="$(ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -x 80 | head -1)"
+      [ -n "$BUSY80" ] && warn "порт 80 кем-то занят — certbot может не пройти"
+    fi
+    for d in $NEED_CERT; do
+      if certbot certonly "${CB_ARGS[@]}" -n --agree-tos -m "$EMAIL" --cert-name "$d" -d "$d" >/dev/null 2>&1; then
+        ok "сертификат выпущен для $d"
+      else
+        err "certbot не выпустил сертификат для $d (проверь A-запись и что :80 доступен снаружи)"
+      fi
+    done
   fi
 fi
 # после продления nginx надо перечитать сертификат
@@ -2020,12 +2092,15 @@ fi
 # =============================================================================
 step "8/14  Сайт-заглушка"
 # =============================================================================
-if [ "$DO_NGINX" != "1" ] || [ "$DO_SITE" != "1" ]; then
-  warn "пропущено"
-elif [ -f "$WEBROOT/index.html" ] && [ "$FORCE_SITE" != "1" ]; then
+# собирает заглушку для домена $DOMAIN в каталоге $WEBROOT по стилю $SITE_THEME;
+# на выходе SITE_NAME и SITE_THEME (итоговый пресет)
+build_site() {
+if [ -f "$WEBROOT/index.html" ] && [ "$FORCE_SITE" != "1" ]; then
   # вытащим название из <title>, иначе в сводке будет пустой прочерк
   SITE_NAME="$(grep -m1 -oE '<title>[^<]*</title>' "$WEBROOT/index.html" 2>/dev/null                | sed -E 's|</?title>||g; s/.*— //')"
   [ -z "$SITE_NAME" ] && SITE_NAME="уже был"
+  # каким пресетом собран старый сайт, неизвестно — не выдаём случайный за него
+  SITE_THEME=""
   ok "сайт в $WEBROOT уже есть («$SITE_NAME») — не трогаю (--force-site чтобы перезаписать)"
 else
   [ -d "$WEBROOT" ] && [ -n "$(ls -A "$WEBROOT" 2>/dev/null)" ] && {
@@ -3447,6 +3522,55 @@ SVG
   SITE_THEME="$PRESET"
   ok "сайт «$SITE_NAME» ($PRESET: $LAYOUT / $TOPIC) собран: $N_TRACKS записей с обложками"
 fi
+}
+
+# пресет для дополнительного домена: сначала раскладка, которой ещё нет
+# (пресеты идут по пять на раскладку), потом просто неиспользованный.
+# Одинаковый сайт на нескольких доменах одного IP сразу связывает их между собой
+pick_other_preset() {
+  local used="$1" p i=0 layouts="" free_l="" free_p=""
+  for p in $ALL_PRESETS_HINT; do
+    case " $used " in *" $p "*) layouts="$layouts $((i / 5))" ;; esac
+    i=$((i + 1))
+  done
+  i=0
+  for p in $ALL_PRESETS_HINT; do
+    case " $used " in *" $p "*) ;; *)
+      free_p="$free_p $p"
+      case " $layouts " in *" $((i / 5)) "*) ;; *) free_l="$free_l $p" ;; esac ;;
+    esac
+    i=$((i + 1))
+  done
+  # shellcheck disable=SC2086
+  shuf -e ${free_l:-${free_p:-$ALL_PRESETS_HINT}} -n 1 2>/dev/null || echo noisefloor
+}
+
+if [ "$DO_NGINX" != "1" ] || [ "$DO_SITE" != "1" ]; then
+  warn "пропущено"
+else
+  MAIN_DOMAIN="$DOMAIN"; MAIN_ROOT="$WEBROOT"; MAIN_THEME="$SITE_THEME"
+  MAIN_SITE_NAME=""; USED_PRESETS=""; EXTRA_SITES=""
+  for d in $DOMAINS; do
+    DOMAIN="$d"
+    if [ "$d" = "$MAIN_DOMAIN" ]; then
+      WEBROOT="$MAIN_ROOT"; SITE_THEME="$MAIN_THEME"
+    else
+      say "  — $d"
+      WEBROOT="$SITES_ROOT/$d"; mkdir -p "$SITES_ROOT"
+      SITE_THEME="$(pick_other_preset "$USED_PRESETS")"
+    fi
+    SITE_NAME=""
+    build_site
+    USED_PRESETS="$USED_PRESETS $SITE_THEME"
+    if [ "$d" = "$MAIN_DOMAIN" ]; then
+      MAIN_SITE_NAME="$SITE_NAME"; MAIN_THEME="$SITE_THEME"
+    else
+      EXTRA_SITES="$EXTRA_SITES
+$d|$WEBROOT|$SITE_NAME|$SITE_THEME"
+    fi
+  done
+  DOMAIN="$MAIN_DOMAIN"; WEBROOT="$MAIN_ROOT"; SITE_THEME="$MAIN_THEME"; SITE_NAME="$MAIN_SITE_NAME"
+fi
 
 # =============================================================================
 step "9/14  nginx"
@@ -3455,6 +3579,77 @@ if [ "$DO_NGINX" != "1" ]; then
   warn "пропущено: домен не задан"
 else
   [ -f "$INSTALL_DIR/nginx.conf" ] && { cp -a "$INSTALL_DIR/nginx.conf" "$INSTALL_DIR/nginx.conf.bak.$STAMP"; ok "бэкап nginx.conf"; }
+
+  # server-блок заглушки одного домена: $1 домен, $2 listen, $3 = 1 — реальный
+  # IP клиента брать из proxy_protocol (его шлёт Xray на сокет, но не на порт)
+  ng_site_block() {
+    local d="$1" listen="$2" pp="$3" root rip=""
+    root="$(site_root "$d")"
+    # сайта для домена нет (--no-site) — отдаём сайт основного, а не 500
+    [ -f "$root/index.html" ] || root="$WEBROOT"
+    # shellcheck disable=SC2016  # $proxy_protocol_addr — переменная nginx
+    [ "$pp" = 1 ] && rip='
+        proxy_set_header X-Real-IP $proxy_protocol_addr;
+        proxy_set_header X-Forwarded-For $proxy_protocol_addr;'
+    cat <<BLOCK
+server {
+    server_name $d;
+    listen $listen;
+    http2 on;
+
+    ssl_certificate         /etc/letsencrypt/live/$d/fullchain.pem;
+    ssl_certificate_key     /etc/letsencrypt/live/$d/privkey.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/$d/fullchain.pem;
+
+    root $root;
+    index index.html;
+    add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
+
+    location $XHTTP_PATH {
+        client_max_body_size 0;$rip
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_http_version 1.1;
+        client_body_timeout 5m;
+        proxy_read_timeout 315s;
+        proxy_send_timeout 5m;
+        proxy_pass http://unix:/dev/shm/xrxh.socket;
+    }
+
+    location $WS_PATH {$rip
+        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_http_version 1.1;
+        proxy_read_timeout 315s;
+        proxy_send_timeout 5m;
+        proxy_pass http://unix:$WS_SOCKET;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+}
+
+BLOCK
+  }
+
+  # в конфиг идут только домены с сертификатом: nginx без файла сертификата
+  # не стартует вовсе и уронил бы заглушку на всех доменах сразу. Основной
+  # домен оставляем всегда — как и раньше, nginx поднимется, когда он выпустится
+  NG_DOMAINS=""
+  for d in $DOMAINS; do
+    if [ "$d" = "$DOMAIN" ] || has_cert "$d"; then
+      NG_DOMAINS="$NG_DOMAINS $d"
+    else
+      err "сертификата для $d нет — в nginx его не добавляю, перезапусти скрипт после выпуска"
+    fi
+  done
+  NG_DOMAINS="${NG_DOMAINS# }"
+  # каталог монтируется в контейнер nginx — должен быть, даже если он пустой
+  mkdir -p "$SITES_ROOT"
+
   # фрагмент для conf.d: nginx слушает не :443, а unix-сокет с proxy_protocol —
   # :443 держит сам Xray и отдаёт сюда всё, что не его трафик (self-steal)
   cat > "$INSTALL_DIR/nginx.conf" <<NGINX
@@ -3478,50 +3673,7 @@ ssl_session_timeout 1d;
 ssl_session_cache shared:MozSSL:10m;
 ssl_session_tickets off;
 
-server {
-    server_name $DOMAIN;
-    listen unix:/dev/shm/nginx.sock ssl proxy_protocol;
-    http2 on;
-
-    ssl_certificate         /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key     /etc/letsencrypt/live/$DOMAIN/privkey.pem;
-    ssl_trusted_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-
-    root $WEBROOT;
-    index index.html;
-    add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
-
-    location $XHTTP_PATH {
-        client_max_body_size 0;
-        proxy_set_header X-Real-IP \$proxy_protocol_addr;
-        proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
-        proxy_set_header Host \$host;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_http_version 1.1;
-        client_body_timeout 5m;
-        proxy_read_timeout 315s;
-        proxy_send_timeout 5m;
-        proxy_pass http://unix:/dev/shm/xrxh.socket;
-    }
-
-    location $WS_PATH {
-        proxy_set_header X-Real-IP \$proxy_protocol_addr;
-        proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
-        proxy_set_header Host \$host;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_http_version 1.1;
-        proxy_read_timeout 315s;
-        proxy_send_timeout 5m;
-        proxy_pass http://unix:$WS_SOCKET;
-    }
-
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-}
-
+$(for d in $NG_DOMAINS; do ng_site_block "$d" "unix:/dev/shm/nginx.sock ssl proxy_protocol" 1; done)
 server {
     listen unix:/dev/shm/nginx.sock ssl proxy_protocol default_server;
     server_name _;
@@ -3542,7 +3694,7 @@ NGINX
 
 server {
     listen 0.0.0.0:80 default_server;
-    server_name $DOMAIN _;
+    server_name $NG_DOMAINS _;
 
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -3562,46 +3714,7 @@ NGINX
   if [ "${FALLBACK_PORT:-0}" != "0" ]; then
     cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
 
-server {
-    server_name $DOMAIN;
-    listen 127.0.0.1:$FALLBACK_PORT ssl;
-    http2 on;
-
-    ssl_certificate         /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key     /etc/letsencrypt/live/$DOMAIN/privkey.pem;
-    ssl_trusted_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-
-    root $WEBROOT;
-    index index.html;
-    add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
-
-    location $XHTTP_PATH {
-        client_max_body_size 0;
-        proxy_set_header Host \$host;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_http_version 1.1;
-        client_body_timeout 5m;
-        proxy_read_timeout 315s;
-        proxy_send_timeout 5m;
-        proxy_pass http://unix:/dev/shm/xrxh.socket;
-    }
-
-    location $WS_PATH {
-        proxy_set_header Host \$host;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_http_version 1.1;
-        proxy_read_timeout 315s;
-        proxy_send_timeout 5m;
-        proxy_pass http://unix:$WS_SOCKET;
-    }
-
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-}
-
+$(for d in $NG_DOMAINS; do ng_site_block "$d" "127.0.0.1:$FALLBACK_PORT ssl" 0; done)
 server {
     listen 127.0.0.1:$FALLBACK_PORT ssl default_server;
     server_name _;
@@ -3611,9 +3724,12 @@ server {
 NGINX
     ok "заглушка также слушает 127.0.0.1:$FALLBACK_PORT (для dest вида 127.0.0.1:$FALLBACK_PORT)"
   fi
-  ok "nginx.conf записан (домен $DOMAIN; XHTTP $XHTTP_PATH → /dev/shm/xrxh.socket; WS $WS_PATH → $WS_SOCKET)"
+  ok "nginx.conf записан (домены: $NG_DOMAINS; XHTTP $XHTTP_PATH → /dev/shm/xrxh.socket; WS $WS_PATH → $WS_SOCKET)"
   say "     инбаунды в панели для этой ноды (Xray подхватит сокеты из /dev/shm):"
-  say "       • VLESS Reality — serverNames содержит $DOMAIN; dest=/dev/shm/nginx.sock (proxyProtocol) или 127.0.0.1:$FALLBACK_PORT"
+  # shellcheck disable=SC2086  # список доменов нужно разбить на слова
+  SN_JSON="$(printf '"%s", ' $NG_DOMAINS | sed 's/, $//')"
+  say "       • VLESS Reality — serverNames: [$SN_JSON]; dest=/dev/shm/nginx.sock (proxyProtocol) или 127.0.0.1:$FALLBACK_PORT"
+  [ "$NG_DOMAINS" != "$DOMAIN" ] && say "                         в хостах панели — по хосту на домен, sni = нужный домен"
   say "       • VLESS XHTTP   — path=$XHTTP_PATH; listen unix:/dev/shm/xrxh.socket"
   say "       • VLESS WS+TLS  — network=ws, path=$WS_PATH; listen unix:$WS_SOCKET (nginx терминирует TLS)"
   say "       • Hysteria2     — UDP :443$([ "${HYSTERIA_PORT:-0}" != "0" ] && echo " и :$HYSTERIA_PORT"); cert /etc/letsencrypt/live/$DOMAIN/{fullchain,privkey}.pem"
@@ -3642,6 +3758,7 @@ fi
 
 if [ -n "$OTHER_SVC" ]; then
   warn "в docker-compose.yml есть свои сервисы ($OTHER_SVC) — файл НЕ трогаю и контейнеры не перезапускаю"
+  [ "$DOMAINS" != "$DOMAIN" ] && warn "сайты доп. доменов лежат в $SITES_ROOT — примонтируй его в свой nginx"
   warn "нода уже обвязана: система подготовлена, ключ и compose оставлены как были"
 elif [ -z "$SECRET_KEY" ]; then
   err "SECRET_KEY не задан — контейнер ноды не поднимаю"
@@ -3702,6 +3819,7 @@ COMPOSE
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - $WEBROOT:$WEBROOT:ro
+      - $SITES_ROOT:$SITES_ROOT:ro
       - /var/www/certbot:/var/www/certbot:ro
       - /dev/shm:/dev/shm:rw
     # воркеры под root: иначе они (юзер nginx) не могут писать в unix-сокеты
@@ -3785,6 +3903,9 @@ if [ "$DO_NGINX" = "1" ]; then
     fi
   elif docker exec remnawave-nginx nginx -t >/dev/null 2>&1; then
     ok "конфиг nginx валиден"
+    # на повторном запуске контейнер не пересоздаётся, а конфиг мог поменяться
+    # (добавился домен) — без перечитывания nginx жил бы со старым
+    docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1
   else
     err "nginx -t не прошёл:"
     docker exec remnawave-nginx nginx -t 2>&1 | sed 's/^/      /'
@@ -3799,45 +3920,51 @@ if [ "$DO_NGINX" = "1" ]; then
     warn "сокета /dev/shm/xrxh.socket ещё нет — появится, когда панель привяжет inbound к ноде"
   fi
 
-  [ -f "$WEBROOT/index.html" ] && ok "сайт-заглушка на месте: $WEBROOT/index.html" || warn "сайта в $WEBROOT нет"
+  for d in ${NG_DOMAINS:-$DOMAINS}; do
+    SR="$(site_root "$d")"
+    [ -f "$SR/index.html" ] && ok "сайт-заглушка $d на месте: $SR/index.html" || warn "сайта для $d в $SR нет"
+  done
 
   # раз nginx занял :80, продлевать standalone-способом уже нельзя — переводим
   # renew на webroot, теперь сертификат обновляется без остановки контейнера
-  RCONF="/etc/letsencrypt/renewal/$DOMAIN.conf"
-  if [ -f "$CERT_DIR/fullchain.pem" ] && [ -d /var/www/certbot ] && [ "$NG_STATE" = "running" ] && [ -f "$RCONF" ]; then
-    # certbot с --keep-until-expiring просто ничего не делает и способ продления
-    # не меняет, поэтому переключаем authenticator прямо в конфиге продления
-    if grep -q '^authenticator = standalone' "$RCONF"; then
-      cp -a "$RCONF" "$RCONF.bak.$STAMP"
-      sed -i 's|^authenticator = standalone|authenticator = webroot|' "$RCONF"
-      grep -q '^webroot_path' "$RCONF" || sed -i '/^authenticator = webroot/a webroot_path = /var/www/certbot,' "$RCONF"
-      grep -q '^\[\[webroot_map\]\]' "$RCONF" || printf '
+  for d in ${NG_DOMAINS:-$DOMAINS}; do
+    RCONF="/etc/letsencrypt/renewal/$d.conf"
+    if has_cert "$d" && [ -d /var/www/certbot ] && [ "$NG_STATE" = "running" ] && [ -f "$RCONF" ]; then
+      # certbot с --keep-until-expiring просто ничего не делает и способ продления
+      # не меняет, поэтому переключаем authenticator прямо в конфиге продления
+      if grep -q '^authenticator = standalone' "$RCONF"; then
+        cp -a "$RCONF" "$RCONF.bak.$STAMP"
+        sed -i 's|^authenticator = standalone|authenticator = webroot|' "$RCONF"
+        grep -q '^webroot_path' "$RCONF" || sed -i '/^authenticator = webroot/a webroot_path = /var/www/certbot,' "$RCONF"
+        grep -q '^\[\[webroot_map\]\]' "$RCONF" || printf '
 [[webroot_map]]
 %s = /var/www/certbot
-' "$DOMAIN" >> "$RCONF"
-      if certbot renew --dry-run --cert-name "$DOMAIN" >/dev/null 2>&1; then
-        ok "продление переведено на webroot и проверено сухим прогоном"
+' "$d" >> "$RCONF"
+        if certbot renew --dry-run --cert-name "$d" >/dev/null 2>&1; then
+          ok "продление $d переведено на webroot и проверено сухим прогоном"
+        else
+          err "после перевода на webroot сухой прогон продления $d не прошёл"
+          say "      проверь вручную: certbot renew --dry-run --cert-name $d"
+        fi
       else
-        err "после перевода на webroot сухой прогон продления не прошёл"
-        say "      проверь вручную: certbot renew --dry-run --cert-name $DOMAIN"
+        ok "продление $d уже настроено без standalone"
       fi
-    else
-      ok "продление уже настроено без standalone"
     fi
-  fi
+  done
 
-  # видно ли, что сертификат продлится сам
-  RC="/etc/letsencrypt/renewal/$DOMAIN.conf"
-  R_AUTH="$(grep -m1 "^authenticator" "$RC" 2>/dev/null | sed "s/.*= *//")"
+  # видно ли, что сертификаты продлятся сами
   R_TIMER="$(systemctl is-active certbot.timer 2>/dev/null)"
-  if [ "$R_TIMER" = "active" ] || [ -f /etc/cron.d/certbot ]; then
-    ok "автопродление сертификата: способ ${R_AUTH:-?}, таймер ${R_TIMER:-cron}"
-  else
-    err "автопродление сертификата не настроено (способ ${R_AUTH:-?}, таймер ${R_TIMER:-нет})"
-  fi
-
+  for d in ${NG_DOMAINS:-$DOMAINS}; do
+    R_AUTH="$(grep -m1 "^authenticator" "/etc/letsencrypt/renewal/$d.conf" 2>/dev/null | sed "s/.*= *//")"
+    if [ "$R_TIMER" = "active" ] || [ -f /etc/cron.d/certbot ]; then
+      ok "автопродление $d: способ ${R_AUTH:-?}, таймер ${R_TIMER:-cron}"
+    else
+      err "автопродление $d не настроено (способ ${R_AUTH:-?}, таймер ${R_TIMER:-нет})"
+    fi
+    D_TILL="$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$d/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+    [ -n "$D_TILL" ] && ok "сертификат $d годен до $D_TILL"
+  done
   CERT_TILL="$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
-  [ -n "$CERT_TILL" ] && ok "сертификат $DOMAIN годен до $CERT_TILL"
 
   # заглушку отдаёт не nginx напрямую, а Xray по правилам инбаунда из панели.
   # Сверяем их: чаще всего сайт «не появляется» именно из-за настроек панели
@@ -4097,6 +4224,14 @@ say "  Образ ноды  : $NODE_IMAGE"
 if [ "$DO_NGINX" = "1" ]; then
   say "  Домен       : $DOMAIN  (сертификат до ${CERT_TILL:-—})"
   say "  Сайт        : $WEBROOT — «${SITE_NAME:-—}», тема ${SITE_THEME:-—}"
+  if [ "$DOMAINS" != "$DOMAIN" ]; then
+    for d in ${DOMAINS#* }; do
+      E_TILL="$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$d/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+      E_LINE="$(printf '%s\n' "${EXTRA_SITES:-}" | grep -m1 "^$d|")"
+      say "  + домен     : $d  (сертификат до ${E_TILL:-—})"
+      [ -n "$E_LINE" ] && say "    сайт      : $(printf '%s' "$E_LINE" | cut -d'|' -f2) — «$(printf '%s' "$E_LINE" | cut -d'|' -f3)», тема $(printf '%s' "$E_LINE" | cut -d'|' -f4 | sed 's/^$/—/')"
+    done
+  fi
   say "  nginx       : ${NG_STATUS:-не запущен}"
   say "  Путь Xray   : $XHTTP_PATH → unix:/dev/shm/xrxh.socket"
 fi
