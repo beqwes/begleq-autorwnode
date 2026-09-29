@@ -63,7 +63,7 @@ DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; D
 # TrafficGuard: списки сканеров и госсетей. Белый список важнее блок-листа —
 # иначе панель или соседняя нода попадут под раздачу
 TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
-FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
+SET_NODE_VER=""; FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
 # Yandex CDN: nginx на :443, Xray XHTTP на loopback.
 CDN_ORIGIN="${CDN_ORIGIN:-}"; CDN_PUBLIC="${CDN_PUBLIC:-}"; CDN_PATH="${CDN_PATH:-}"
 CDN_XRAY_PORT="${CDN_XRAY_PORT:-}"; CDN_EDGE_HEADER="${CDN_EDGE_HEADER:-X-Cdn-Secret}"
@@ -143,6 +143,8 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --node-port <port>   порт связи с панелью (по умолчанию 2222, спросит при запуске)
   --node-version <tag> версия образа ноды, например 3.2.2 или latest
   --node-image <ref>   образ целиком, если нужен свой реестр
+  --set-node-version <tag>  только сменить версию ноды на готовой ноде и выйти
+                       (проверит логи на alert 40 и откатит при ошибке)
   --domain <host>      self-steal домен ноды: сертификат, nginx и сайт-заглушка.
                        Несколько SNI — через запятую или повтором флага:
                        --domain a.com,b.com,c.com (у каждого свой сертификат
@@ -204,6 +206,7 @@ while [ $# -gt 0 ]; do
     --node-port)   NODE_PORT="${2:-}"; shift 2;;
     --node-version) NODE_IMAGE="remnawave/node:${2:-}"; shift 2;;
     --node-image)  NODE_IMAGE="${2:-}"; shift 2;;
+    --set-node-version) SET_NODE_VER="${2:-}"; shift 2;;
     --domain)      DOMAIN="${DOMAIN:+$DOMAIN,}${2:-}"; shift 2;;
     --email)       EMAIL="${2:-}"; shift 2;;
     --xhttp-path)  XHTTP_PATH="${2:-}"; shift 2;;
@@ -452,7 +455,7 @@ menu_items() {
   local L R i
   L=("НОДА" " 1|состояние подробно" " 2|настроить или обновить" " 8|заглушка: пересобрать"
      "" "ДОМЕНЫ (SNI)" "13|добавить домен" "14|убрать домен"
-     "" "СКРИПТ" "10|обновить с гитхаба")
+     "15|сменить версию ноды" "" "СКРИПТ" "10|обновить с гитхаба")
   R=("СЕТЬ" " 3|WARP: включить" " 4|WARP: выключить" " 5|WARP: снести" " 9|WARP: outbound для панели"
      " 6|BBR и сетевые лимиты" " 7|TrafficGuard: исключения"
      "" "YANDEX CDN" "11|настроить origin" "12|инструкция")
@@ -530,6 +533,7 @@ menu_main() {
       12) bash "$SELF" --cdn-show ;;
       13) menu_add_sni ;;
       14) menu_del_sni ;;
+      15) change_node_version ;;
       0|q|"") say "пока"; return 0 ;;
       *)  warn "нет такого пункта" ;;
     esac
@@ -621,6 +625,74 @@ menu_del_sni() {
   sni_apply "$(printf '%s\n' $cur | grep -vxF "$d" | tr '\n' ' ')"
   say ""
   say "  в панели: убери $d из serverNames инбаунда и его хост"
+}
+
+# сменить образ ноды на готовой ноде: правим только строку image у ноды в
+# compose, пересоздаём один контейнер и смотрим в лог — при alert 40 откат.
+# $1 — версия (3.2.2), repo:tag или пусто (тогда спросим)
+change_node_version() {
+  local want="${1:-}" cf="$INSTALL_DIR/docker-compose.yml" old new tags i log
+  [ -f "$cf" ] || { bad "нет $cf — сначала настрой ноду (пункт 2)"; return 1; }
+  old="$(grep -oE 'image:[[:space:]]*[^[:space:]]*remnawave/node[^[:space:]]*' "$cf" | head -1 | sed -E 's/image:[[:space:]]*//')"
+  [ -n "$old" ] || { bad "в $cf не нашёл образ remnawave/node"; return 1; }
+  ok "сейчас: $old"
+
+  if [ -z "$want" ]; then
+    # свежие теги с Docker Hub — чтобы не вспоминать номера
+    tags="$(curl -s --max-time 8 'https://hub.docker.com/v2/repositories/remnawave/node/tags?page_size=30' 2>/dev/null \
+            | grep -oE '"name":"[0-9]+\.[0-9]+\.[0-9]+"' | cut -d'"' -f4 | head -10 | tr '\n' ' ')"
+    [ -n "$tags" ] && say "  последние версии: $tags"
+    say "  панель 2.8.x → 3.2.2; более новая панель — нода той же версии (3.4.x → 3.4.x)"
+    printf '%s?%s версия ноды (Enter — отмена): ' "$CC" "$C0"
+    IFS= read -r want < "$TTY_IN" || true
+    [ -n "$want" ] || { warn "отменено"; return 0; }
+  fi
+  case "$want" in
+    *:*) new="$want" ;;
+    */*) new="$want:latest" ;;
+    *)   new="remnawave/node:$want" ;;
+  esac
+  [ "$new" = "$old" ] && { ok "уже стоит $new"; return 0; }
+  printf '%s' "$new" | grep -qE '^[A-Za-z0-9./_-]+:[A-Za-z0-9._-]+$' || { bad "странное имя образа: $new"; return 1; }
+
+  cp -a "$cf" "$cf.bak.$STAMP"
+  sed -i "s|image:\([[:space:]]*\)$old\([[:space:]]*\)\$|image:\1$new\2|" "$cf"
+  grep -qF "$new" "$cf" || { bad "не смог поменять образ в $cf"; mv -f "$cf.bak.$STAMP" "$cf"; return 1; }
+  ok "образ в compose: $old → $new (бэкап $cf.bak.$STAMP)"
+
+  if ! (cd "$INSTALL_DIR" && docker compose pull -q remnanode >/dev/null 2>&1); then
+    bad "образ $new не скачался — такого тега нет? Возвращаю $old"
+    mv -f "$cf.bak.$STAMP" "$cf"
+    return 1
+  fi
+  (cd "$INSTALL_DIR" && docker compose up -d remnanode >/dev/null 2>&1) || { bad "docker compose up упал"; return 1; }
+
+  # ошибка рукопожатия с панелью видна в логе в первые секунды после старта
+  say "  жду 25 с, смотрю лог ноды…"
+  i=0; log=""
+  while [ "$i" -lt 25 ]; do
+    sleep 5; i=$((i + 5))
+    log="$(docker logs --since 1m remnanode 2>&1 | tr -d '\000')"
+    printf '%s' "$log" | grep -qiE 'alert number 40|handshake failure' && break
+  done
+  if printf '%s' "$log" | grep -qiE 'alert number 40|handshake failure'; then
+    bad "нода не сходится с панелью (alert 40) — $new к этой панели не подходит"
+    if [ -n "${TTY_IN:-}" ] && [ "$ASSUME_YES" != 1 ] && ! confirm "Откатить на $old?" y; then
+      warn "оставил $new"
+      return 1
+    fi
+    mv -f "$cf.bak.$STAMP" "$cf"
+    (cd "$INSTALL_DIR" && docker compose up -d remnanode >/dev/null 2>&1)
+    ok "вернул $old"
+    return 1
+  fi
+  if [ "$(docker inspect -f '{{.State.Status}}' remnanode 2>/dev/null)" = "running" ]; then
+    ok "нода работает на $new, ошибок рукопожатия в логе нет"
+    say "  проверь в панели, что нода online"
+  else
+    bad "контейнер remnanode не запущен — смотри: docker logs remnanode"
+    return 1
+  fi
 }
 
 # ставит команду begleq, чтобы меню открывалось откуда угодно
@@ -1551,6 +1623,11 @@ if [ "$MENU" = "1" ]; then
   exit 0
 fi
 
+if [ -n "$SET_NODE_VER" ]; then
+  change_node_version "$SET_NODE_VER"
+  exit $?
+fi
+
 if [ "$WARP_OFF" = "1" ] || [ "$WARP_PURGE" = "1" ]; then
   [ "$WARP_PURGE" = "1" ] && purge_warp || disable_warp
   say ""
@@ -1989,7 +2066,7 @@ if [ -z "$NODE_IMAGE" ]; then
   say "  Версия ноды должна совпадать с версией панели, иначе mTLS не сойдётся"
   say "  и в логах будет «tls alert handshake failure ... alert number 40»."
   say "  Достаточно вписать номер версии, например 3.2.2 — имя образа подставится само."
-  say "  latest сейчас 3.3.x и подходит только к панелям 3.3.x; с панелями 2.8.x берут 3.2.2."
+  say "  latest подходит только к самой свежей панели; с панелями 2.8.x берут 3.2.2."
   case "$OLD_IMAGE" in
     *:latest) warn "сейчас на ноде $OLD_IMAGE — если ловишь alert 40, впиши конкретную версию" ;;
   esac
