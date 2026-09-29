@@ -63,7 +63,7 @@ DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; D
 # TrafficGuard: списки сканеров и госсетей. Белый список важнее блок-листа —
 # иначе панель или соседняя нода попадут под раздачу
 TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
-FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
+SET_NODE_VER=""; FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
 # Yandex CDN: nginx на :443, Xray XHTTP на loopback.
 CDN_ORIGIN="${CDN_ORIGIN:-}"; CDN_PUBLIC="${CDN_PUBLIC:-}"; CDN_PATH="${CDN_PATH:-}"
 CDN_XRAY_PORT="${CDN_XRAY_PORT:-}"; CDN_EDGE_HEADER="${CDN_EDGE_HEADER:-X-Cdn-Secret}"
@@ -71,16 +71,67 @@ CDN_EDGE_VALUE="${CDN_EDGE_VALUE:-}"; CDN_OPEN_ORIGIN=0; CDN_WANT_SECRET=0
 YANDEX_CDN_ONLY=0; YANDEX_CDN_SHOW=0
 
 # ---------- вывод ----------
-if [ -t 1 ]; then C0=$'\e[0m'; CB=$'\e[1m'; CG=$'\e[32m'; CY=$'\e[33m'; CR=$'\e[31m'; CC=$'\e[36m'; CM=$'\e[35m'
-else C0=""; CB=""; CG=""; CY=""; CR=""; CC=""; CM=""; fi
+# в терминале — цвет и значки, в файл/пайп — простые ok/!!/xx без escape-кодов
+if [ -t 1 ]; then
+  C0=$'\e[0m'; CB=$'\e[1m'; CD=$'\e[2m'; CG=$'\e[32m'; CY=$'\e[33m'; CR=$'\e[31m'; CC=$'\e[36m'; CM=$'\e[35m'
+  I_OK="✓"; I_WARN="!"; I_BAD="✗"; I_DOT="●"; I_OFF="○"; BG_G=$'\e[42m'; BG_R=$'\e[41m'
+else
+  C0=""; CB=""; CD=""; CG=""; CY=""; CR=""; CC=""; CM=""
+  I_OK="ok"; I_WARN="!!"; I_BAD="xx"; I_DOT="*"; I_OFF="-"; BG_G=""; BG_R=""
+fi
+W=76   # ширина линеек: влезает в стандартные 80 колонок
+
+# длина в символах, а не байтах: printf %-Ns считает байты, и кириллица разъезжается
+vlen() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g' | LC_ALL=C.UTF-8 wc -m | tr -d ' '; }
+# pad ТЕКСТ ШИРИНА — дополнить пробелами до ширины (цветовые коды не считаются)
+pad() { local n; n="$(vlen "$1")"; printf '%s%*s' "$1" $(( $2 > n ? $2 - n : 0 )) ''; }
+# rule [ТЕКСТ] — линейка на всю ширину, с подписью слева
+rule() {
+  local t="${1:-}" n
+  if [ -n "$t" ]; then n=$(( W - $(vlen "$t") - 4 )); else n=$W; fi
+  [ "$n" -lt 3 ] && n=3
+  printf '%s' "$CD"; [ -n "$t" ] && printf '── %s%s%s%s ' "$C0$CB" "$t" "$C0" "$CD"
+  printf '%*s' "$n" '' | sed 's/ /─/g'; printf '%s\n' "$C0"
+}
+# dot СОСТОЯНИЕ — цветная точка: ok|warn|bad|off
+dot() {
+  case "$1" in
+    ok) printf '%s%s%s' "$CG" "$I_DOT" "$C0" ;; warn) printf '%s%s%s' "$CY" "$I_DOT" "$C0" ;;
+    bad) printf '%s%s%s' "$CR" "$I_DOT" "$C0" ;; *) printf '%s%s%s' "$CD" "$I_OFF" "$C0" ;;
+  esac
+}
+
 say()  { printf '%s\n' "$*"; }
-ok()   { printf '%s  ok %s %s\n' "$CG" "$C0" "$*"; }
-warn() { printf '%s  !! %s %s\n' "$CY" "$C0" "$*"; }
-bad()  { printf '%s  xx %s %s\n' "$CR" "$C0" "$*"; }
+ok()   { printf '  %s%s%s %s\n' "$CG" "$I_OK" "$C0" "$*"; }
+warn() { printf '  %s%s%s %s\n' "$CY" "$I_WARN" "$C0" "$*"; }
+bad()  { printf '  %s%s%s %s\n' "$CR" "$I_BAD" "$C0" "$*"; }
 err()  { bad "$*"; FAILED="$FAILED
   - $*"; }
-step() { printf '\n%s==> %s%s\n' "$CB$CC" "$*" "$C0"; }
-part() { printf '\n%s========== %s ==========%s\n' "$CB$CC" "$*" "$C0"; }
+# step "3/14  Swap" → номер шага цветом, заголовок жирным, линейка до края
+step() {
+  local num="" t="$*"
+  case "$t" in [0-9]*/*"  "*) num="${t%%  *}"; t="${t#*  }" ;; esac
+  printf '\n'
+  if [ -n "$num" ]; then
+    printf '%s%s%s ' "$CC$CB" "$num" "$C0"
+    W=$(( W - ${#num} - 1 )) rule "$t"
+  else
+    rule "$t"
+  fi
+}
+part() {
+  printf '\n%s' "$CB$CC"
+  printf '%*s' "$W" '' | sed 's/ /━/g'
+  printf '\n  %s\n' "$*"
+  printf '%*s' "$W" '' | sed 's/ /━/g'
+  printf '%s\n' "$C0"
+}
+# логотип: три строки, 30 колонок
+logo() {
+  printf '%s' "$CC$CB"
+  printf '%s\n' '┏┓ ┏━╸┏━╸╻  ┏━╸┏━┓   ┏━┓┏━┓┏━┓' '┣┻┓┣╸ ┃╺┓┃  ┣╸ ┃┓┃╺━╸┣━┛┣┳┛┃ ┃' '┗━┛┗━╸┗━┛┗━╸┗━╸┗┻┛   ╹  ╹┗╸┗━┛'
+  printf '%s' "$C0"
+}
 die()  { printf '\n%sОСТАНОВ:%s %s\n' "$CR" "$C0" "$*" >&2; exit 1; }
 
 usage() {
@@ -92,6 +143,8 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --node-port <port>   порт связи с панелью (по умолчанию 2222, спросит при запуске)
   --node-version <tag> версия образа ноды, например 3.2.2 или latest
   --node-image <ref>   образ целиком, если нужен свой реестр
+  --set-node-version <tag>  только сменить версию ноды на готовой ноде и выйти
+                       (проверит логи на alert 40 и откатит при ошибке)
   --domain <host>      self-steal домен ноды: сертификат, nginx и сайт-заглушка.
                        Несколько SNI — через запятую или повтором флага:
                        --domain a.com,b.com,c.com (у каждого свой сертификат
@@ -153,6 +206,7 @@ while [ $# -gt 0 ]; do
     --node-port)   NODE_PORT="${2:-}"; shift 2;;
     --node-version) NODE_IMAGE="remnawave/node:${2:-}"; shift 2;;
     --node-image)  NODE_IMAGE="${2:-}"; shift 2;;
+    --set-node-version) SET_NODE_VER="${2:-}"; shift 2;;
     --domain)      DOMAIN="${DOMAIN:+$DOMAIN,}${2:-}"; shift 2;;
     --email)       EMAIL="${2:-}"; shift 2;;
     --xhttp-path)  XHTTP_PATH="${2:-}"; shift 2;;
@@ -331,42 +385,103 @@ check_panel_inbound() {
 }
 
 # меню настроек. Открывается командой begleq из любого места
+# аптайм по-русски: «3 дн 4 ч», «5 ч 12 мин»
+uptime_ru() {
+  local t d h m
+  t="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; t="${t:-0}"
+  d=$((t / 86400)); h=$((t % 86400 / 3600)); m=$((t % 3600 / 60))
+  if [ "$d" -gt 0 ]; then echo "$d дн $h ч"; else echo "$h ч $m мин"; fi
+}
+
+# дней до конца сертификата домена, пусто — сертификата нет
+cert_days() {
+  local end
+  end="$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$1/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+  [ -n "$end" ] || return 0
+  echo $(( ($(date -d "$end" +%s 2>/dev/null || echo 0) - $(date +%s)) / 86400 ))
+}
+
+# шапка меню: логотип, хост, сводка состояния и домены со сроком сертификата
+menu_header() {
+  local node ngx cc warp tg cdn img doms d days n=0
+  node="$(docker inspect -f '{{.State.Status}}' remnanode 2>/dev/null)"
+  ngx="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
+  img="$(docker inspect -f '{{.Config.Image}}' remnanode 2>/dev/null | sed 's|.*:||')"
+  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+
+  logo | {
+    IFS= read -r l1; IFS= read -r l2; IFS= read -r l3
+    printf '%s   %s%s%s\n' "$l1" "$CB" "$(hostname)" "$C0"
+    printf '%s   %s%s · v%s%s\n' "$l2" "$CD" "$(date '+%d.%m.%Y %H:%M')" "$VERSION" "$C0"
+    printf '%s   %sаптайм %s%s\n' "$l3" "$CD" "$(uptime_ru)" "$C0"
+  }
+  rule
+
+  st() {   # st СОСТОЯНИЕ ПОДПИСЬ ЗНАЧЕНИЕ — ячейка сводки шириной 25
+    pad "$(dot "$1") $(pad "$2" 6)$3" 25
+  }
+  case "$node" in running) node="$(st ok нода "${img:-running}")" ;; "") node="$(st off нода нет)" ;; *) node="$(st bad нода "$node")" ;; esac
+  case "$ngx" in running) ngx="$(st ok nginx работает)" ;; "") ngx="$(st off nginx нет)" ;; *) ngx="$(st bad nginx "$ngx")" ;; esac
+  [ "$cc" = bbr ] && cc="$(st ok BBR вкл)" || cc="$(st warn BBR "${cc:-?}")"
+  ip link show warp >/dev/null 2>&1 && warp="$(st ok WARP поднят)" || warp="$(st off WARP выкл)"
+  if ipset list TG-BLOCK-V4 >/dev/null 2>&1; then
+    tg="$(st ok TG "$(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]') сетей")"
+  else
+    tg="$(st off TG нет)"
+  fi
+  [ -f "$INSTALL_DIR/yandex-cdn.env" ] && cdn="$(st ok CDN origin)" || cdn="$(st off CDN нет)"
+  printf '  %s%s%s\n' "$node" "$ngx" "$cc"
+  printf '  %s%s%s\n' "$warp" "$tg" "$cdn"
+
+  doms="$(conf_domains)"
+  if [ -n "$doms" ]; then
+    rule "домены"
+    for d in $doms; do
+      n=$((n + 1))
+      days="$(cert_days "$d")"
+      if [ -z "$days" ]; then
+        printf '  %s %s %sнет сертификата%s\n' "$(dot bad)" "$(pad "$d" 32)" "$CR" "$C0"
+      elif [ "$days" -lt 14 ]; then
+        printf '  %s %s %sсертификат %s дн.%s\n' "$(dot warn)" "$(pad "$d" 32)" "$CY" "$days" "$C0"
+      else
+        printf '  %s %s %sсертификат %s дн.%s\n' "$(dot ok)" "$(pad "$d" 32)" "$CD" "$days" "$C0"
+      fi
+    done
+  fi
+}
+
+# пункты меню по разделам, в две колонки. Номера прежние — их знают на память
+menu_items() {
+  local L R i
+  L=("НОДА" " 1|состояние подробно" " 2|настроить или обновить" " 8|заглушка: пересобрать"
+     "" "ДОМЕНЫ (SNI)" "13|добавить домен" "14|убрать домен"
+     "15|сменить версию ноды" "" "СКРИПТ" "10|обновить с гитхаба")
+  R=("СЕТЬ" " 3|WARP: включить" " 4|WARP: выключить" " 5|WARP: снести" " 9|WARP: outbound для панели"
+     " 6|BBR и сетевые лимиты" " 7|TrafficGuard: исключения"
+     "" "YANDEX CDN" "11|настроить origin" "12|инструкция")
+  cell() {
+    case "$1" in
+      "") printf '%s' "" ;;
+      *"|"*) printf '%s%s%s  %s' "$CC$CB" "${1%%|*}" "$C0" "${1#*|}" ;;
+      *) printf '%s%s%s' "$CD" "$1" "$C0" ;;
+    esac
+  }
+  rule
+  for i in $(seq 0 $(( ${#R[@]} > ${#L[@]} ? ${#R[@]} - 1 : ${#L[@]} - 1 ))); do
+    printf '  %s%s\n' "$(pad "$(cell "${L[$i]:-}")" 36)" "$(cell "${R[$i]:-}")"
+  done
+  printf '\n  %s 0%s  выход\n' "$CC$CB" "$C0"
+  rule
+}
+
 menu_main() {
   [ -n "$TTY_IN" ] || die "меню нужен терминал — запусти из консоли сервера"
   SELF="$INSTALL_DIR/node-setup.sh"
   [ -f "$SELF" ] || SELF="$0"
   while :; do
     clear 2>/dev/null || printf '\033[2J\033[H'
-    printf '%b\n' "${CB}${CC}begleq${C0} · $(hostname) · $(date '+%d.%m.%Y %H:%M')"
-    say ""
-    # короткая сводка, чтобы было видно, что вообще происходит
-    NODE_ST="$(docker inspect -f '{{.State.Status}}' remnanode 2>/dev/null)"
-    NGX_ST="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
-    CC_ST="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
-    ip link show warp >/dev/null 2>&1 && W_ST="поднят" || W_ST="выключен"
-    ipset list TG-BLOCK-V4 >/dev/null 2>&1 && TG_ST="$(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]') сетей" || TG_ST="не стоит"
-    CDN_ST="нет"
-    [ -f "$INSTALL_DIR/yandex-cdn.env" ] && CDN_ST="origin"
-    printf '  нода: %-12s nginx: %-12s BBR: %-6s WARP: %-9s TrafficGuard: %s\n' \
-      "${NODE_ST:-нет}" "${NGX_ST:-нет}" "${CC_ST:-?}" "$W_ST" "$TG_ST"
-    printf '  Yandex CDN: %s\n' "$CDN_ST"
-    say ""
-    say "  1) состояние ноды подробно"
-    say "  2) настроить или обновить ноду"
-    say "  3) WARP: включить"
-    say "  4) WARP: выключить"
-    say "  5) WARP: снести полностью"
-    say "  6) BBR и сетевые лимиты: включить"
-    say "  7) TrafficGuard: исключения"
-    say "  8) заглушка: пересобрать"
-    say "  9) показать outbound для панели"
-    say " 10) обновить сам скрипт с гитхаба"
-    say " 11) Yandex CDN: настроить origin"
-    say " 12) Yandex CDN: инструкция для панели и консоли"
-    say " 13) SNI: добавить домен"
-    say " 14) SNI: убрать домен"
-    say "  0) выход"
-    say ""
+    menu_header
+    menu_items
     printf '%b' "${CC}?${C0} выбор: "
     IFS= read -r choice < "$TTY_IN" || break
     say ""
@@ -418,6 +533,7 @@ menu_main() {
       12) bash "$SELF" --cdn-show ;;
       13) menu_add_sni ;;
       14) menu_del_sni ;;
+      15) change_node_version ;;
       0|q|"") say "пока"; return 0 ;;
       *)  warn "нет такого пункта" ;;
     esac
@@ -509,6 +625,74 @@ menu_del_sni() {
   sni_apply "$(printf '%s\n' $cur | grep -vxF "$d" | tr '\n' ' ')"
   say ""
   say "  в панели: убери $d из serverNames инбаунда и его хост"
+}
+
+# сменить образ ноды на готовой ноде: правим только строку image у ноды в
+# compose, пересоздаём один контейнер и смотрим в лог — при alert 40 откат.
+# $1 — версия (3.2.2), repo:tag или пусто (тогда спросим)
+change_node_version() {
+  local want="${1:-}" cf="$INSTALL_DIR/docker-compose.yml" old new tags i log
+  [ -f "$cf" ] || { bad "нет $cf — сначала настрой ноду (пункт 2)"; return 1; }
+  old="$(grep -oE 'image:[[:space:]]*[^[:space:]]*remnawave/node[^[:space:]]*' "$cf" | head -1 | sed -E 's/image:[[:space:]]*//')"
+  [ -n "$old" ] || { bad "в $cf не нашёл образ remnawave/node"; return 1; }
+  ok "сейчас: $old"
+
+  if [ -z "$want" ]; then
+    # свежие теги с Docker Hub — чтобы не вспоминать номера
+    tags="$(curl -s --max-time 8 'https://hub.docker.com/v2/repositories/remnawave/node/tags?page_size=30' 2>/dev/null \
+            | grep -oE '"name":"[0-9]+\.[0-9]+\.[0-9]+"' | cut -d'"' -f4 | head -10 | tr '\n' ' ')"
+    [ -n "$tags" ] && say "  последние версии: $tags"
+    say "  панель 2.8.x → 3.2.2; более новая панель — нода той же версии (3.4.x → 3.4.x)"
+    printf '%s?%s версия ноды (Enter — отмена): ' "$CC" "$C0"
+    IFS= read -r want < "$TTY_IN" || true
+    [ -n "$want" ] || { warn "отменено"; return 0; }
+  fi
+  case "$want" in
+    *:*) new="$want" ;;
+    */*) new="$want:latest" ;;
+    *)   new="remnawave/node:$want" ;;
+  esac
+  [ "$new" = "$old" ] && { ok "уже стоит $new"; return 0; }
+  printf '%s' "$new" | grep -qE '^[A-Za-z0-9./_-]+:[A-Za-z0-9._-]+$' || { bad "странное имя образа: $new"; return 1; }
+
+  cp -a "$cf" "$cf.bak.$STAMP"
+  sed -i "s|image:\([[:space:]]*\)$old\([[:space:]]*\)\$|image:\1$new\2|" "$cf"
+  grep -qF "$new" "$cf" || { bad "не смог поменять образ в $cf"; mv -f "$cf.bak.$STAMP" "$cf"; return 1; }
+  ok "образ в compose: $old → $new (бэкап $cf.bak.$STAMP)"
+
+  if ! (cd "$INSTALL_DIR" && docker compose pull -q remnanode >/dev/null 2>&1); then
+    bad "образ $new не скачался — такого тега нет? Возвращаю $old"
+    mv -f "$cf.bak.$STAMP" "$cf"
+    return 1
+  fi
+  (cd "$INSTALL_DIR" && docker compose up -d remnanode >/dev/null 2>&1) || { bad "docker compose up упал"; return 1; }
+
+  # ошибка рукопожатия с панелью видна в логе в первые секунды после старта
+  say "  жду 25 с, смотрю лог ноды…"
+  i=0; log=""
+  while [ "$i" -lt 25 ]; do
+    sleep 5; i=$((i + 5))
+    log="$(docker logs --since 1m remnanode 2>&1 | tr -d '\000')"
+    printf '%s' "$log" | grep -qiE 'alert number 40|handshake failure' && break
+  done
+  if printf '%s' "$log" | grep -qiE 'alert number 40|handshake failure'; then
+    bad "нода не сходится с панелью (alert 40) — $new к этой панели не подходит"
+    if [ -n "${TTY_IN:-}" ] && [ "$ASSUME_YES" != 1 ] && ! confirm "Откатить на $old?" y; then
+      warn "оставил $new"
+      return 1
+    fi
+    mv -f "$cf.bak.$STAMP" "$cf"
+    (cd "$INSTALL_DIR" && docker compose up -d remnanode >/dev/null 2>&1)
+    ok "вернул $old"
+    return 1
+  fi
+  if [ "$(docker inspect -f '{{.State.Status}}' remnanode 2>/dev/null)" = "running" ]; then
+    ok "нода работает на $new, ошибок рукопожатия в логе нет"
+    say "  проверь в панели, что нода online"
+  else
+    bad "контейнер remnanode не запущен — смотри: docker logs remnanode"
+    return 1
+  fi
 }
 
 # ставит команду begleq, чтобы меню открывалось откуда угодно
@@ -1287,92 +1471,124 @@ elif [ ! -d /etc/update-motd.d ]; then
   warn "нет /etc/update-motd.d — баннер при входе не поставить"
 else
   cat > /etc/update-motd.d/99-remnanode <<'MOTD'
-#!/bin/sh
+#!/bin/bash
 # Состояние ноды при входе по SSH. Поставлен node-setup.sh, убрать — просто удалить файл.
 command -v docker >/dev/null 2>&1 || exit 0
+DIR="@INSTALL_DIR@"
+W=76
 
-G='\033[32m'; Y='\033[33m'; R='\033[31m'; C='\033[36m'; B='\033[1m'; N='\033[0m'
-TAB="$(printf '\t')"
+# вывод motd уходит не в терминал, а в файл, поэтому цвет включаем сами
+N=$'\e[0m'; B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; C=$'\e[36m'
+vlen() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g' | LC_ALL=C.UTF-8 wc -m | tr -d ' '; }
+pad()  { local n; n="$(vlen "$1")"; printf '%s%*s' "$1" $(( $2 > n ? $2 - n : 0 )) ''; }
+rule() {
+  local t="${1:-}" n=$W
+  [ -n "$t" ] && n=$(( W - $(vlen "$t") - 4 ))
+  printf '%s' "$D"; [ -n "$t" ] && printf '── %s%s%s%s ' "$N$B" "$t" "$N" "$D"
+  printf '%*s' "$n" '' | sed 's/ /─/g'; printf '%s\n' "$N"
+}
+dot() { case "$1" in ok) printf '%s●%s' "$G" "$N";; warn) printf '%s●%s' "$Y" "$N";; bad) printf '%s●%s' "$R" "$N";; *) printf '%s○%s' "$D" "$N";; esac; }
+st()  { pad "$(dot "$1") $(pad "$2" 6)$3" 25; }   # ячейка сводки
+listening() { ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx "$1"; }
 
-# чистим экран от вывода логина и печатаем шапку
+t="$(cut -d. -f1 /proc/uptime)"; d=$((t / 86400)); h=$((t % 86400 / 3600)); m=$((t % 3600 / 60))
+[ "$d" -gt 0 ] && UP="$d дн $h ч" || UP="$h ч $m мин"
+
 clear 2>/dev/null || printf '\033[2J\033[H'
-printf "%b" "${C}${B}"
-cat <<'BANNER'
-██████    ████████    ██████  ██        ████████    ████              ██████    ██████      ████    ██████
-██████    ████████    ██████  ██        ████████    ████              ██████    ██████      ████    ██████
-██    ██  ██        ██        ██        ██        ██    ██            ██    ██  ██    ██  ██    ██  ██    ██
-██    ██  ██        ██        ██        ██        ██    ██            ██    ██  ██    ██  ██    ██  ██    ██
-██████    ██████    ██  ████  ██        ██████    ██    ██    ████    ██████    ██████    ██    ██  ██    ██
-██████    ██████    ██  ████  ██        ██████    ██    ██    ████    ██████    ██████    ██    ██  ██    ██
-██    ██  ██        ██    ██  ██        ██        ██  ████            ██        ██  ██    ██    ██  ██    ██
-██    ██  ██        ██    ██  ██        ██        ██  ████            ██        ██  ██    ██    ██  ██    ██
-██████    ████████    ██████  ████████  ████████    ██████            ██        ██    ██    ████    ██████
-██████    ████████    ██████  ████████  ████████    ██████            ██        ██    ██    ████    ██████
-BANNER
-printf "%b\n" "${N}"
-printf "%b\n" "  ${B}$(hostname)${N}  ·  $(date '+%d.%m.%Y %H:%M')  ·  аптайм $(uptime -p 2>/dev/null | sed 's/^up //')"
+{ printf '%s\n' '┏┓ ┏━╸┏━╸╻  ┏━╸┏━┓   ┏━┓┏━┓┏━┓' '┣┻┓┣╸ ┃╺┓┃  ┣╸ ┃┓┃╺━╸┣━┛┣┳┛┃ ┃' '┗━┛┗━╸┗━┛┗━╸┗━╸┗┻┛   ╹  ╹┗╸┗━┛'; } | {
+  IFS= read -r l1; IFS= read -r l2; IFS= read -r l3
+  printf '%s%s%s   %s%s%s\n' "$C$B" "$l1" "$N" "$B" "$(hostname)" "$N"
+  printf '%s%s%s   %s%s%s\n' "$C$B" "$l2" "$N" "$D" "$(date '+%d.%m.%Y %H:%M')" "$N"
+  printf '%s%s%s   %sаптайм %s%s\n' "$C$B" "$l3" "$N" "$D" "$UP" "$N"
+}
+rule
 
-printf "%b\n" "${B}${C}=== контейнеры ===${N}"
-if [ -z "$(docker ps -aq 2>/dev/null)" ]; then
-  printf "%b\n" "  ${Y}!!${N}  контейнеров нет"
+# --- сводка ---
+NODE="$(docker inspect -f '{{.State.Status}}' remnanode 2>/dev/null)"
+NGX="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
+IMG="$(docker inspect -f '{{.Config.Image}}' remnanode 2>/dev/null | sed 's|.*:||')"
+PORT="$(grep -hE '^[[:space:]]*NODE_PORT=' "$DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"'\''[:space:]')"
+PORT="${PORT:-2222}"
+CDN=0; grep -qE 'upstream xray_xhttp|generated-by: node-setup yandex-cdn' "$DIR/nginx.conf" 2>/dev/null && CDN=1
+
+case "$NODE" in running) c1="$(st ok нода "${IMG:-работает}")";; "") c1="$(st off нода нет)";; *) c1="$(st bad нода "$NODE")";; esac
+case "$NGX" in running) c2="$(st ok nginx работает)";; "") c2="$(st off nginx нет)";; *) c2="$(st bad nginx "$NGX")";; esac
+listening "$PORT" && c3="$(st ok порт "$PORT")" || c3="$(st bad порт "$PORT закрыт")"
+if listening 443; then
+  [ "$CDN" = 1 ] && c4="$(st ok 443 "nginx (CDN)")" || c4="$(st ok 443 Xray)"
 else
-  docker ps -a --format "{{.Names}}${TAB}{{.Status}}${TAB}{{.Image}}" 2>/dev/null |
-  while IFS="$TAB" read -r name status image; do
-    case "$status" in
-      Up*restarting*|Restarting*) m="${R}xx${N}" ;;
-      Up*unhealthy*)              m="${R}xx${N}" ;;
-      Up*)                        m="${G}ok${N}" ;;
-      *)                          m="${Y}!!${N}" ;;
-    esac
-    printf "%b\n" "  $m  $(printf '%-20s %-26s %s' "$name" "$image" "$status")"
+  c4="$(st warn 443 "никто")"
+fi
+if ipset list TG-BLOCK-V4 >/dev/null 2>&1; then
+  if iptables -C INPUT -j TRAFFIC-GUARD 2>/dev/null; then
+    c5="$(st ok TG "$(ipset list TG-BLOCK-V4 | grep -cE '^[0-9]') сетей")"
+  else
+    c5="$(st bad TG "не в INPUT")"
+  fi
+else
+  c5="$(st off TG нет)"
+fi
+ip link show warp >/dev/null 2>&1 && c6="$(st ok WARP поднят)" || c6="$(st off WARP выкл)"
+printf '  %s%s%s\n' "$c1" "$c2" "$c3"
+printf '  %s%s%s\n' "$c4" "$c5" "$c6"
+
+# ресурсы: одна строка, чтобы сразу видеть, не упёрлись ли
+LOAD="$(cut -d' ' -f1 /proc/loadavg)"
+MEM="$(free -m | awk '/^Mem:/{printf "%d/%d МБ", $3, $2}')"
+DISK="$(df -h / | awk 'NR==2{print $5}')"
+printf '  %sнагрузка%s %s   %sпамять%s %s   %sдиск%s %s\n' "$D" "$N" "$LOAD" "$D" "$N" "$MEM" "$D" "$N" "$DISK"
+
+# --- домены и сертификаты ---
+if [ -s "$DIR/domains" ]; then
+  DOMS="$(tr '\n' ' ' < "$DIR/domains")"
+else
+  DOMS="$(grep -E '^[[:space:]]*server_name[[:space:]]+[A-Za-z0-9.-]+;' "$DIR/nginx.conf" 2>/dev/null \
+          | sed -E 's/.*server_name[[:space:]]+//; s/;.*//' | awk '!s[$0]++' | tr '\n' ' ')"
+fi
+if [ -n "${DOMS// /}" ]; then
+  rule "домены"
+  for dm in $DOMS; do
+    end="$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$dm/fullchain.pem" 2>/dev/null | cut -d= -f2)"
+    if [ -z "$end" ]; then
+      printf '  %s %s %sнет сертификата%s\n' "$(dot bad)" "$(pad "$dm" 32)" "$R" "$N"
+    else
+      days=$(( ($(date -d "$end" +%s) - $(date +%s)) / 86400 ))
+      if [ "$days" -lt 14 ]; then
+        printf '  %s %s %sсертификат %s дн.%s\n' "$(dot warn)" "$(pad "$dm" 32)" "$Y" "$days" "$N"
+      else
+        printf '  %s %s %sсертификат %s дн.%s\n' "$(dot ok)" "$(pad "$dm" 32)" "$D" "$days" "$N"
+      fi
+    fi
   done
 fi
 
-PORT="$(grep -hE '^[[:space:]]*NODE_PORT=' /opt/remnanode/.env 2>/dev/null | head -1 | cut -d= -f2 | tr -d '\"'\"'\''[:space:]')"
-[ -z "$PORT" ] && PORT=2222
-if ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx "$PORT"; then
-  printf "%b\n" "  ${G}ok${N}  порт панели $PORT слушается"
-else
-  printf "%b\n" "  ${R}xx${N}  порт панели $PORT НЕ слушается"
-fi
-if ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx 443; then
-  if grep -qE 'upstream xray_xhttp|generated-by: node-setup yandex-cdn' /opt/remnanode/nginx.conf 2>/dev/null; then
-    printf "%b\n" "  ${G}ok${N}  443 занят nginx (Yandex CDN)"
-  else
-    printf "%b\n" "  ${G}ok${N}  443 занят Xray"
-  fi
-else
-  printf "%b\n" "  ${Y}!!${N}  на 443 никто не слушает"
-fi
-if grep -qE 'upstream xray_xhttp|generated-by: node-setup yandex-cdn' /opt/remnanode/nginx.conf 2>/dev/null; then
-  :
-else
-  [ -S /dev/shm/nginx.sock ]  && printf "%b\n" "  ${G}ok${N}  сокет nginx поднят" \
-                              || printf "%b\n" "  ${Y}!!${N}  сокета /dev/shm/nginx.sock нет"
-fi
-[ -S /dev/shm/xrxh.socket ] && printf "%b\n" "  ${G}ok${N}  сокет Xray поднят"
-if ipset list TG-BLOCK-V4 >/dev/null 2>&1; then
-  if iptables -C INPUT -j TRAFFIC-GUARD 2>/dev/null; then
-    printf "%b
-" "  ${G}ok${N}  TrafficGuard: $(ipset list TG-BLOCK-V4 | grep -cE '^[0-9]') сетей в блоке, $(ipset list TG-ALLOW-V4 2>/dev/null | grep -cE '^[0-9]') в белом списке"
-  else
-    printf "%b
-" "  ${R}xx${N}  TrafficGuard: цепочка не в INPUT (systemctl start tg-apply)"
-  fi
+# --- контейнеры: показываем только если что-то не так ---
+BADC="$(docker ps -a --format '{{.Names}}|{{.Status}}' 2>/dev/null | grep -vE '\|Up' ; \
+        docker ps --format '{{.Names}}|{{.Status}}' 2>/dev/null | grep -E 'unhealthy')"
+if [ -n "$BADC" ]; then
+  rule "контейнеры с проблемами"
+  printf '%s\n' "$BADC" | while IFS='|' read -r cn cs; do
+    printf '  %s %s %s%s%s\n' "$(dot bad)" "$(pad "$cn" 22)" "$D" "$cs" "$N"
+    if [ "$cn" = remnawave-nginx ]; then
+      docker logs --tail 40 "$cn" 2>&1 | tr -d '\000' | grep -iE 'emerg|error' | tail -2 | cut -c1-68 | sed 's/^/      /'
+    fi
+  done
 fi
 
-for c in remnawave-nginx; do
-  st="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)"
-  [ -n "$st" ] && [ "$st" != "running" ] && {
-    printf "%b\n" "${B}${R}--- $c упал, причина: ---${N}"
-    docker logs --tail 40 "$c" 2>&1 | tr -d '\000' | grep -iE 'emerg|error' | tail -2 | cut -c1-160 | sed 's/^/  /'
-  }
-done
-
-printf "\n%b\n" "${B}${C}=== логи ноды, последние 25 строк ===${N}"
-docker logs --tail 25 remnanode 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-150 | sed 's/^/  /'
-printf "\n%b\n" "  настройки: ${B}begleq${N}   ·   подробный отчёт: ${B}begleq${N} → 1"
+# --- лог ноды: ошибки за последние 300 строк, иначе хвост ---
+LOG="$(docker logs --tail 300 remnanode 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g')"
+ERRS="$(printf '%s\n' "$LOG" | grep -iE 'error|fail|panic|refused|denied' | tail -5)"
+if [ -n "$ERRS" ]; then
+  rule "ошибки в логе ноды"
+  printf '%s\n' "$ERRS" | cut -c1-74 | sed "s/^/  $R/; s/\$/$N/"
+else
+  rule "лог ноды"
+  printf '%s\n' "$LOG" | tail -5 | cut -c1-74 | sed "s/^/  $D/; s/\$/$N/"
+fi
+rule
+printf '  %sbegleq%s — меню настроек   ·   %sbegleq → 1%s — подробный отчёт\n\n' "$C$B" "$N" "$C$B" "$N"
 MOTD
+  sed -i "s|@INSTALL_DIR@|$INSTALL_DIR|" /etc/update-motd.d/99-remnanode
   chmod +x /etc/update-motd.d/99-remnanode
 
   # штатный MOTD слишком болтливый: юридический текст Debian, реклама ESM,
@@ -1393,11 +1609,23 @@ fi
 ALL_PRESETS_HINT="noisefloor subframe neonmile driftcult fieldroom dustline kissaten roastline reelpaper pixelpress sweaterweather monogrid tapehouse kanso studioquiet nexora riotgrain hexline filmgrain sunbleach makimahouse arcadechar phonkchar synthchar cinechar ghibliroom animecine kyotocine ambientcine gamecine"
 
 # в меню эта строка ни к чему — оно всё равно очищает экран
-[ "$MENU" = "1" ] || say "${CB}node-setup v$VERSION${C0} — $(hostname), $(date '+%d.%m.%Y %H:%M %Z')"
+if [ "$MENU" != "1" ]; then
+  logo | {
+    IFS= read -r l1; IFS= read -r l2; IFS= read -r l3
+    printf '%s   %s%s%s\n' "$l1" "$CB" "$(hostname)" "$C0"
+    printf '%s   %snode-setup v%s%s\n' "$l2" "$CD" "$VERSION" "$C0"
+    printf '%s   %s%s%s\n' "$l3" "$CD" "$(date '+%d.%m.%Y %H:%M %Z')" "$C0"
+  }
+fi
 
 if [ "$MENU" = "1" ]; then
   menu_main
   exit 0
+fi
+
+if [ -n "$SET_NODE_VER" ]; then
+  change_node_version "$SET_NODE_VER"
+  exit $?
 fi
 
 if [ "$WARP_OFF" = "1" ] || [ "$WARP_PURGE" = "1" ]; then
@@ -1838,7 +2066,7 @@ if [ -z "$NODE_IMAGE" ]; then
   say "  Версия ноды должна совпадать с версией панели, иначе mTLS не сойдётся"
   say "  и в логах будет «tls alert handshake failure ... alert number 40»."
   say "  Достаточно вписать номер версии, например 3.2.2 — имя образа подставится само."
-  say "  latest сейчас 3.3.x и подходит только к панелям 3.3.x; с панелями 2.8.x берут 3.2.2."
+  say "  latest подходит только к самой свежей панели; с панелями 2.8.x берут 3.2.2."
   case "$OLD_IMAGE" in
     *:latest) warn "сейчас на ноде $OLD_IMAGE — если ловишь alert 40, впиши конкретную версию" ;;
   esac
@@ -4112,7 +4340,6 @@ if [ "$DO_NGINX" = "1" ]; then
     D_TILL="$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$d/fullchain.pem" 2>/dev/null | cut -d= -f2)"
     [ -n "$D_TILL" ] && ok "сертификат $d годен до $D_TILL"
   done
-  CERT_TILL="$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)"
 
   # заглушку отдаёт не nginx напрямую, а Xray по правилам инбаунда из панели.
   # Сверяем их: чаще всего сайт «не появляется» именно из-за настроек панели
@@ -4364,47 +4591,61 @@ install_motd
 # #############################################################################
 part "ИТОГ"
 # #############################################################################
-say "  Хост        : $(hostname)"
-say "  ОС          : $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}")"
-say "  Docker      : $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,)"
-say "  Каталог     : $INSTALL_DIR"
-say "  Образ ноды  : $NODE_IMAGE"
-if [ "$DO_NGINX" = "1" ]; then
-  say "  Домен       : $DOMAIN  (сертификат до ${CERT_TILL:-—})"
-  say "  Сайт        : $WEBROOT — «${SITE_NAME:-—}», тема ${SITE_THEME:-—}"
-  if [ "$DOMAINS" != "$DOMAIN" ]; then
-    for d in ${DOMAINS#* }; do
-      E_TILL="$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$d/fullchain.pem" 2>/dev/null | cut -d= -f2)"
-      E_LINE="$(printf '%s\n' "${EXTRA_SITES:-}" | grep -m1 "^$d|")"
-      say "  + домен     : $d  (сертификат до ${E_TILL:-—})"
-      [ -n "$E_LINE" ] && say "    сайт      : $(printf '%s' "$E_LINE" | cut -d'|' -f2) — «$(printf '%s' "$E_LINE" | cut -d'|' -f3)», тема $(printf '%s' "$E_LINE" | cut -d'|' -f4 | sed 's/^$/—/')"
-    done
-  fi
-  say "  nginx       : ${NG_STATUS:-не запущен}"
-  say "  Путь Xray   : $XHTTP_PATH → unix:/dev/shm/xrxh.socket"
-fi
+# kv КЛЮЧ ЗНАЧЕНИЕ — строка сводки: ключ приглушён и выровнен
+kv() { printf '  %s%s%s %s\n' "$CD" "$(pad "$1" 12)" "$C0" "$2"; }
+
+rule "сервер"
+kv "хост" "$(hostname)"
+kv "ОС" "$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}")"
+kv "Docker" "$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,)"
+kv "UFW" "$(ufw status 2>/dev/null | head -1 | sed 's/^Status: //')"
+kv "swap" "$(free -m | awk '/^Swap:/{print $2}') МБ"
+
+rule "нода"
+kv "каталог" "$INSTALL_DIR"
+kv "образ" "$NODE_IMAGE"
+kv "контейнер" "${CT_STATUS:-не запущен}"
 if [ -n "$OLD_PORT" ] && [ "$OLD_PORT" != "$NODE_PORT" ]; then
-  say "  Порт ноды   : $NODE_PORT  (был $OLD_PORT — поменяй его и в панели!)  (панель: ${PANEL_IP:-любой IP})"
+  kv "порт" "$NODE_PORT  ${CY}(был $OLD_PORT — поменяй его и в панели!)${C0}  панель: ${PANEL_IP:-любой IP}"
 else
-  say "  Порт ноды   : $NODE_PORT  (панель: ${PANEL_IP:-любой IP})"
+  kv "порт" "$NODE_PORT  ${CD}панель: ${PANEL_IP:-любой IP}${C0}"
 fi
-say "  SECRET_KEY  : ${SECRET_KEY:0:10}… (${#SECRET_KEY} симв.)"
-say "  Контейнер   : ${CT_STATUS:-не запущен}"
-say "  UFW         : $(ufw status 2>/dev/null | head -1)"
-say "  Swap        : $(free -m | awk '/^Swap:/{print $2}') МБ"
+kv "SECRET_KEY" "${SECRET_KEY:0:10}… ${CD}(${#SECRET_KEY} симв.)${C0}"
 if ip link show warp >/dev/null 2>&1; then
-  say "  WARP        : поднят, outbound для панели в $INSTALL_DIR/warp-outbound.json"
+  kv "WARP" "поднят ${CD}— outbound для панели: $INSTALL_DIR/warp-outbound.json${C0}"
 else
-  say "  WARP        : не поднят"
+  kv "WARP" "не поднят"
 fi
+
+if [ "$DO_NGINX" = "1" ]; then
+  rule "домены"
+  kv "nginx" "${NG_STATUS:-не запущен}"
+  kv "путь Xray" "$XHTTP_PATH → unix:/dev/shm/xrxh.socket"
+  for d in $DOMAINS; do
+    days="$(cert_days "$d")"
+    if [ -z "$days" ]; then st_d=bad; st_c="${CR}нет сертификата${C0}"
+    elif [ "$days" -lt 14 ]; then st_d=warn; st_c="${CY}сертификат ${days} дн.${C0}"
+    else st_d=ok; st_c="${CD}сертификат ${days} дн.${C0}"; fi
+    if [ "$d" = "$DOMAIN" ]; then
+      site="${SITE_NAME:-—}"; theme="${SITE_THEME:-—}"
+    else
+      E_LINE="$(printf '%s\n' "${EXTRA_SITES:-}" | grep -m1 "^$d|")"
+      site="$(printf '%s' "$E_LINE" | cut -d'|' -f3)"; theme="$(printf '%s' "$E_LINE" | cut -d'|' -f4)"
+    fi
+    printf '  %s %s %s\n' "$(dot "$st_d")" "$(pad "$CB$d$C0" 34)" "$st_c"
+    [ -n "$site" ] && printf '    %s«%s» · %s · %s%s\n' "$CD" "$site" "${theme:-—}" "$(site_root "$d")" "$C0"
+  done
+fi
+
 say ""
 if [ -n "$FAILED" ]; then
-  bad "проблемы:$FAILED"
+  rule "проблемы"
+  printf '%s\n' "$FAILED" | sed '/^$/d; s/^  - //' | while IFS= read -r l; do bad "$l"; done
   say ""
-  say "РЕЗУЛЬТАТ: настроено с ошибками"
+  printf '  %s РЕЗУЛЬТАТ: настроено с ошибками %s\n\n' "$CB$BG_R" "$C0"
   exit 1
 fi
-say "Дальше: в панели Remnawave привязать ноду к этому IP и порту $NODE_PORT,"
-say "потом настроить inbound и хосты. Подготовка сервера закончена."
+say "  Дальше: в панели Remnawave привязать ноду к этому IP и порту $NODE_PORT,"
+say "  потом настроить inbound и хосты. Подготовка сервера закончена."
 say ""
-say "РЕЗУЛЬТАТ: ok"
+printf '  %s РЕЗУЛЬТАТ: ok %s\n\n' "$CB$BG_G" "$C0"
