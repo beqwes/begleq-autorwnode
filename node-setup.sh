@@ -64,7 +64,7 @@ DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; D
 # TrafficGuard: списки сканеров и госсетей. Белый список важнее блок-листа —
 # иначе панель или соседняя нода попадут под раздачу
 TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
-SET_NODE_VER=""; BUSY_OK=0; NODE_PORT_FORCED=0; FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
+TG_ONLY=0; SET_NODE_VER=""; BUSY_OK=0; NODE_PORT_FORCED=0; FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
 # --site-only: только сертификат, сайт-заглушка и nginx. Нода, её ключ и порт,
 # фаервол (кроме 80/443 под выпуск сертификата) и система не трогаются
 SITE_ONLY=0
@@ -181,6 +181,7 @@ node-setup.sh — отчёт о ноде и её первоначальная н
                        (через запятую; IP панели и текущий SSH добавятся сами)
   --no-traffic-guard   не ставить TrafficGuard
   --tg-force           поставить, даже если на ноде уже есть свой traffic-guard
+  --tg-only            только поставить или обновить TrafficGuard и выйти
   --no-warp            не ставить WARP
   --warp-force         переставить WARP, даже если интерфейс уже есть
   --warp-only          только поставить WARP и выйти
@@ -239,6 +240,7 @@ while [ $# -gt 0 ]; do
     --tg-allow)    TG_ALLOW="${2:-}"; shift 2;;
     --no-traffic-guard) DO_TG=0; shift;;
     --tg-force)    TG_FORCE=1; shift;;
+    --tg-only)     TG_ONLY=1; shift;;
     --no-warp)     DO_WARP=0; shift;;
     --warp-force)  WARP_FORCE=1; shift;;
     --warp-only)   WARP_ONLY=1; shift;;
@@ -945,7 +947,8 @@ tg_check_ip() {
 menu_tg() {
   local c q pick nb na ts entries e i f note nets more
   if ! command -v tg-allow >/dev/null 2>&1 || ! ipset list TG-BLOCK-V4 >/dev/null 2>&1; then
-    warn "TrafficGuard не установлен — поставится при пункте 2"
+    warn "TrafficGuard не установлен"
+    confirm "Поставить сейчас (ноду и остальное не трогаю)?" y && bash "$SELF" --tg-only
     return 0
   fi
   while :; do
@@ -1978,6 +1981,295 @@ MOTD
 fi
 }
 
+# --- белый список TrafficGuard: чтобы свои же ноды/релеи не улетели в блок.
+# Он живёт в allow.list и между запусками не теряется: показываем, что там
+# уже есть (Enter оставляет как было), а спрашиваем только новые адреса ---
+# «адрес|подпись» по строке: подпись — комментарий над адресом (tg-allow add),
+# шапку файла за подпись не принимаем
+tg_saved() {
+  awk '/^[[:space:]]*#/ { c = $0; sub(/^[[:space:]]*#[[:space:]]*/, "", c)
+                          if (c ~ /^(Исключения TrafficGuard|Сюда IP панели|Менять удобнее)/) c = ""; next }
+       /^[[:space:]]*$/ { c = ""; next }
+       { if (!seen[$1]++) print $1 "|" c; c = "" }' "$TG_DIR/allow.list" 2>/dev/null
+}
+# вопрос о белом списке: показывает, что уже есть, и спрашивает новые адреса;
+# на выходе TG_ALLOW (только похожее на IP), TG_SAVED и TG_SAVED_N
+ask_tg_allow() {
+TG_SAVED="$(tg_saved)"
+TG_SAVED_N="$(printf '%s' "$TG_SAVED" | grep -c .)"
+if [ "$DO_TG" = "1" ] && [ -z "$TG_ALLOW" ]; then
+  say ""
+  say "  Белый список TrafficGuard — адреса, которые никогда не блокируются."
+  say "  Сюда: IP других нод и релеев, свои админские IP. Иначе своя же нода,"
+  say "  попав в гос-/сканер-листы, окажется заблокирована (банки «не работают»)."
+  say "  IP панели (${PANEL_IP:-не задан}) и текущий SSH добавятся сами."
+  if [ "$TG_SAVED_N" -gt 0 ]; then
+    ok "в белом списке уже $TG_SAVED_N адр. — они остаются:"
+    printf '%s\n' "$TG_SAVED" | head -12 | while IFS='|' read -r a note; do
+      [ "$a" = "$PANEL_IP" ] && note="${note:-панель}"
+      say "      $(pad "$a" 20) $CD$note$C0"
+    done
+    [ "$TG_SAVED_N" -gt 12 ] && say "      ${CD}…и ещё $((TG_SAVED_N - 12)) — весь список: begleq → 7${C0}"
+    say "  Enter — оставить как есть; новые — через запятую, можно CIDR. Убрать — begleq → 7."
+    ask TG_ALLOW "Добавить IP в белый список TrafficGuard" ""
+  else
+    say "  Несколько — через запятую, можно CIDR. Enter — пропустить."
+    ask TG_ALLOW "IP в белый список TrafficGuard" ""
+  fi
+fi
+# мусор в allow.list не пишем: tg-refresh его всё равно пропустит, а в
+# списке он висел бы годами
+TG_OK=""
+for a in $(printf '%s' "$TG_ALLOW" | tr ',;' '  '); do
+  if printf '%s' "$a" | grep -qE '^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F]*:[0-9a-fA-F:]+(/[0-9]{1,3})?)$'; then
+    TG_OK="${TG_OK:+$TG_OK,}$a"
+  else
+    bad "не похоже на IP: «$a» — в белый список не добавляю"
+  fi
+done
+TG_ALLOW="$TG_OK"
+}
+
+# TrafficGuard: блок-листы в ipset, цепочка в INPUT и FORWARD, белый список
+# важнее блок-листа. Ставится в любом режиме и отдельно (--tg-only, begleq → 7)
+install_traffic_guard() {
+if [ "$DO_TG" != "1" ]; then
+  warn "пропущено (--no-traffic-guard)"
+elif [ -x /usr/local/bin/traffic-guard ] && [ "$TG_FORCE" != "1" ]; then
+  warn "на ноде уже стоит свой traffic-guard — не трогаю (--tg-force поставит наш рядом)"
+else
+  apt-get install -y -qq ipset >/dev/null 2>&1
+  command -v ipset >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq ipset >/dev/null 2>&1; }
+  if ! command -v ipset >/dev/null 2>&1; then
+    err "ipset не установился — TrafficGuard не поставить"
+  else
+    mkdir -p /etc/traffic-guard/lists /var/lib/traffic-guard
+
+    # --- белый список: панель, текущий SSH-клиент и всё, что дали флагом ---
+    TG_ALLOW_FILE=/etc/traffic-guard/allow.list
+    if [ ! -f "$TG_ALLOW_FILE" ]; then
+      cat > "$TG_ALLOW_FILE" <<'ALLOWHDR'
+# Исключения TrafficGuard: эти адреса никогда не блокируются.
+# Сюда IP панели и других нод. По одному на строку, можно CIDR.
+# Менять удобнее командой:  tg-allow add 1.2.3.4 "панель"
+ALLOWHDR
+    fi
+    SSH_PEER="$(echo "${SSH_CLIENT:-}" | awk '{print $1}')"
+    for a in $PANEL_IP $SSH_PEER $(printf '%s' "$TG_ALLOW" | tr ',;' '  '); do
+      [ -z "$a" ] && continue
+      grep -qxF "$a" "$TG_ALLOW_FILE" 2>/dev/null || echo "$a" >> "$TG_ALLOW_FILE"
+    done
+    ok "в белом списке: $(grep -cvE '^\s*(#|$)' "$TG_ALLOW_FILE") адресов"
+
+    # --- обновление списков и применение правил ---
+    cat > /usr/local/bin/tg-refresh <<'TGREFRESH'
+#!/bin/sh
+# TrafficGuard: качает блок-листы, собирает ipset и вешает цепочку в INPUT.
+# Белый список всегда имеет приоритет над блок-листом.
+#   tg-refresh              полное обновление
+#   tg-refresh --allow-only только перечитать белый список
+#   tg-refresh --hook-only  только пересобрать цепочку и вернуть её в INPUT
+set -u
+DIR=/etc/traffic-guard
+LISTS=$DIR/lists
+ALLOW=$DIR/allow.list
+SAVE=/var/lib/traffic-guard/ipset.save
+SRC="https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/main/public/antiscanner.list
+https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/main/public/government_networks.list"
+MODE="${1:-full}"
+
+mkdir -p "$LISTS" /var/lib/traffic-guard
+[ -f "$ALLOW" ] || : > "$ALLOW"
+
+fill() {   # fill ИМЯ_СЕТА СЕМЕЙСТВО ФАЙЛЫ...
+  set_name="$1"; fam="$2"; shift 2
+  ipset create "$set_name" hash:net family "$fam" -exist
+  ipset create "${set_name}-tmp" hash:net family "$fam" -exist
+  ipset flush "${set_name}-tmp"
+  n=0
+  if [ "$fam" = inet ]; then
+    pat='^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'
+  else
+    pat='^[0-9a-fA-F:]+(/[0-9]{1,3})?$'
+  fi
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    sed 's/#.*//' "$f" | tr -d ' \t\r' | grep -E "$pat" | while IFS= read -r net; do
+      ipset add "${set_name}-tmp" "$net" -exist 2>/dev/null
+    done
+  done
+  n="$(ipset list "${set_name}-tmp" | grep -cE "$pat")"
+  ipset swap "${set_name}-tmp" "$set_name"
+  ipset destroy "${set_name}-tmp"
+  echo "$n"
+}
+
+if [ "$MODE" = "full" ]; then
+  for u in $SRC; do
+    f="$LISTS/$(basename "$u")"
+    if curl -fsSL --max-time 90 "$u" -o "$f.new" && [ -s "$f.new" ]; then
+      mv "$f.new" "$f"
+    else
+      rm -f "$f.new"
+      echo "tg-refresh: не смог скачать $u, оставляю прежний список" >&2
+    fi
+  done
+fi
+
+if [ "$MODE" != "hook-only" ]; then
+  A4="$(fill TG-ALLOW-V4 inet "$ALLOW")"
+  A6="$(fill TG-ALLOW-V6 inet6 "$ALLOW")"
+  B4="$(fill TG-BLOCK-V4 inet "$LISTS"/*.list)"
+  B6="$(fill TG-BLOCK-V6 inet6 "$LISTS"/*.list)"
+  echo "tg-refresh: блок v4=$B4 v6=$B6, разрешено v4=$A4 v6=$A6"
+else
+  for s in TG-ALLOW-V4 TG-BLOCK-V4; do ipset create "$s" hash:net family inet -exist; done
+  for s in TG-ALLOW-V6 TG-BLOCK-V6; do ipset create "$s" hash:net family inet6 -exist; done
+fi
+
+# цепочка: сначала пропускаем своих (RETURN — трафик идёт дальше по правилам
+# ufw, а не проскакивает мимо них), только потом рубим сканеры
+iptables -N TRAFFIC-GUARD 2>/dev/null
+iptables -F TRAFFIC-GUARD
+iptables -A TRAFFIC-GUARD -m set --match-set TG-ALLOW-V4 src -j RETURN
+iptables -A TRAFFIC-GUARD -m set --match-set TG-BLOCK-V4 src -j DROP
+while iptables -D INPUT -j TRAFFIC-GUARD 2>/dev/null; do :; done
+iptables -I INPUT 1 -j TRAFFIC-GUARD
+# и в FORWARD: трафик, который сервер пересылает дальше (DNAT :443 на ноду
+# на другом сервере, контейнеры в сети docker), идёт мимо INPUT
+while iptables -D FORWARD -j TRAFFIC-GUARD 2>/dev/null; do :; done
+iptables -I FORWARD 1 -j TRAFFIC-GUARD
+
+if command -v ip6tables >/dev/null 2>&1; then
+  ip6tables -N TRAFFIC-GUARD 2>/dev/null
+  ip6tables -F TRAFFIC-GUARD
+  ip6tables -A TRAFFIC-GUARD -m set --match-set TG-ALLOW-V6 src -j RETURN
+  ip6tables -A TRAFFIC-GUARD -m set --match-set TG-BLOCK-V6 src -j DROP
+  while ip6tables -D INPUT -j TRAFFIC-GUARD 2>/dev/null; do :; done
+  ip6tables -I INPUT 1 -j TRAFFIC-GUARD
+  while ip6tables -D FORWARD -j TRAFFIC-GUARD 2>/dev/null; do :; done
+  ip6tables -I FORWARD 1 -j TRAFFIC-GUARD
+fi
+
+ipset save > "$SAVE" 2>/dev/null
+exit 0
+TGREFRESH
+    chmod +x /usr/local/bin/tg-refresh
+
+    # --- управление исключениями ---
+    cat > /usr/local/bin/tg-allow <<'TGALLOW'
+#!/bin/sh
+# Исключения TrafficGuard.
+#   tg-allow add 1.2.3.4 [комментарий]   добавить
+#   tg-allow del 1.2.3.4                 убрать
+#   tg-allow list                        показать
+#   tg-allow test 1.2.3.4                проверить, блокируется ли адрес
+set -u
+F=/etc/traffic-guard/allow.list
+[ -f "$F" ] || : > "$F"
+case "${1:-list}" in
+  add)
+    [ -n "${2:-}" ] || { echo "нужен адрес: tg-allow add 1.2.3.4 [комментарий]"; exit 1; }
+    if grep -qxF "$2" "$F"; then
+      echo "$2 уже в списке"
+    else
+      [ -n "${3:-}" ] && echo "# $3" >> "$F"
+      echo "$2" >> "$F"
+      echo "добавлен $2"
+    fi
+    /usr/local/bin/tg-refresh --allow-only
+    ;;
+  del)
+    [ -n "${2:-}" ] || { echo "нужен адрес"; exit 1; }
+    grep -vxF "$2" "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    echo "убран $2"
+    /usr/local/bin/tg-refresh --allow-only
+    ;;
+  test)
+    [ -n "${2:-}" ] || { echo "нужен адрес"; exit 1; }
+    if ipset test TG-ALLOW-V4 "$2" 2>/dev/null; then
+      echo "$2: в белом списке, не блокируется"
+    elif ipset test TG-BLOCK-V4 "$2" 2>/dev/null; then
+      echo "$2: БЛОКИРУЕТСЯ (добавь: tg-allow add $2)"
+    else
+      echo "$2: не в списках, проходит обычные правила"
+    fi
+    ;;
+  *)
+    echo "белый список ($F):"
+    grep -vE '^\s*$' "$F" | sed 's/^/  /'
+    echo
+    echo "в ipset: $(ipset list TG-ALLOW-V4 2>/dev/null | grep -cE '^[0-9]') адресов"
+    echo "в блок-листе: $(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]') сетей"
+    ;;
+esac
+TGALLOW
+    chmod +x /usr/local/bin/tg-allow
+
+    # --- systemd: восстановление после перезагрузки и ежедневное обновление ---
+    cat > /etc/systemd/system/tg-apply.service <<'UNIT'
+[Unit]
+Description=TrafficGuard: восстановить ipset и вернуть цепочку в INPUT
+After=network.target ufw.service docker.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '[ -f /var/lib/traffic-guard/ipset.save ] && ipset restore -exist < /var/lib/traffic-guard/ipset.save || true'
+ExecStart=/usr/local/bin/tg-refresh --hook-only
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    cat > /etc/systemd/system/tg-refresh.service <<'UNIT'
+[Unit]
+Description=TrafficGuard: обновление блок-листов
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tg-refresh
+UNIT
+
+    cat > /etc/systemd/system/tg-refresh.timer <<'UNIT'
+[Unit]
+Description=TrafficGuard: ежедневное обновление блок-листов
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable --now tg-apply.service >/dev/null 2>&1
+    systemctl enable --now tg-refresh.timer >/dev/null 2>&1
+
+    TG_OUT="$(/usr/local/bin/tg-refresh 2>&1 | tail -1)"
+    ok "${TG_OUT:-правила применены}"
+
+    # --- контроль: свои адреса не должны блокироваться ---
+    TG_BAD=""
+    for a in $PANEL_IP $SSH_PEER; do
+      [ -z "$a" ] && continue
+      if ipset test TG-ALLOW-V4 "$a" >/dev/null 2>&1; then
+        ok "$a в белом списке"
+      else
+        TG_BAD="$TG_BAD $a"
+      fi
+    done
+    [ -n "$TG_BAD" ] && err "не попали в белый список:$TG_BAD — добавь через tg-allow add"
+    ok "исключения: tg-allow add <ip> | tg-allow list | tg-allow test <ip>"
+  fi
+fi
+}
+
 ALL_PRESETS_HINT="noisefloor subframe neonmile driftcult fieldroom dustline kissaten roastline reelpaper pixelpress sweaterweather monogrid tapehouse kanso studioquiet nexora riotgrain hexline filmgrain sunbleach makimahouse arcadechar phonkchar synthchar cinechar ghibliroom animecine kyotocine ambientcine gamecine"
 
 # в меню эта строка ни к чему — оно всё равно очищает экран
@@ -2010,6 +2302,24 @@ fi
 if [ "$BBR_ONLY" = "1" ]; then
   enable_bbr
   say ""
+  say "РЕЗУЛЬТАТ: ok"
+  exit 0
+fi
+
+if [ "$TG_ONLY" = "1" ]; then
+  part "TrafficGuard"
+  # IP панели не спрашиваем, но сохранённый обязан попасть в белый список
+  [ -z "$PANEL_IP" ] && [ -s "$INSTALL_DIR/panel_ip" ] && PANEL_IP="$(head -1 "$INSTALL_DIR/panel_ip" | tr -d '[:space:]')"
+  DO_TG=1
+  ask_tg_allow
+  say ""
+  install_traffic_guard
+  say ""
+  if [ -n "$FAILED" ]; then
+    bad "проблемы:$FAILED"
+    say "РЕЗУЛЬТАТ: с ошибками"
+    exit 1
+  fi
   say "РЕЗУЛЬТАТ: ok"
   exit 0
 fi
@@ -2567,50 +2877,7 @@ if [ "$SITE_ONLY" = "1" ] && [ -z "$PANEL_IP" ] && [ -s "$INSTALL_DIR/panel_ip" 
   PANEL_IP="$(head -1 "$INSTALL_DIR/panel_ip" | tr -d '[:space:]')"
 fi
 
-# --- белый список TrafficGuard: чтобы свои же ноды/релеи не улетели в блок.
-# Он живёт в allow.list и между запусками не теряется: показываем, что там
-# уже есть (Enter оставляет как было), а спрашиваем только новые адреса ---
-# «адрес|подпись» по строке: подпись — комментарий над адресом (tg-allow add),
-# шапку файла за подпись не принимаем
-tg_saved() {
-  awk '/^[[:space:]]*#/ { c = $0; sub(/^[[:space:]]*#[[:space:]]*/, "", c)
-                          if (c ~ /^(Исключения TrafficGuard|Сюда IP панели|Менять удобнее)/) c = ""; next }
-       /^[[:space:]]*$/ { c = ""; next }
-       { if (!seen[$1]++) print $1 "|" c; c = "" }' "$TG_DIR/allow.list" 2>/dev/null
-}
-TG_SAVED="$(tg_saved)"
-TG_SAVED_N="$(printf '%s' "$TG_SAVED" | grep -c .)"
-if [ "$DO_TG" = "1" ] && [ -z "$TG_ALLOW" ]; then
-  say ""
-  say "  Белый список TrafficGuard — адреса, которые никогда не блокируются."
-  say "  Сюда: IP других нод и релеев, свои админские IP. Иначе своя же нода,"
-  say "  попав в гос-/сканер-листы, окажется заблокирована (банки «не работают»)."
-  say "  IP панели (${PANEL_IP:-не задан}) и текущий SSH добавятся сами."
-  if [ "$TG_SAVED_N" -gt 0 ]; then
-    ok "в белом списке уже $TG_SAVED_N адр. — они остаются:"
-    printf '%s\n' "$TG_SAVED" | head -12 | while IFS='|' read -r a note; do
-      [ "$a" = "$PANEL_IP" ] && note="${note:-панель}"
-      say "      $(pad "$a" 20) $CD$note$C0"
-    done
-    [ "$TG_SAVED_N" -gt 12 ] && say "      ${CD}…и ещё $((TG_SAVED_N - 12)) — весь список: begleq → 7${C0}"
-    say "  Enter — оставить как есть; новые — через запятую, можно CIDR. Убрать — begleq → 7."
-    ask TG_ALLOW "Добавить IP в белый список TrafficGuard" ""
-  else
-    say "  Несколько — через запятую, можно CIDR. Enter — пропустить."
-    ask TG_ALLOW "IP в белый список TrafficGuard" ""
-  fi
-fi
-# мусор в allow.list не пишем: tg-refresh его всё равно пропустит, а в
-# списке он висел бы годами
-TG_OK=""
-for a in $(printf '%s' "$TG_ALLOW" | tr ',;' '  '); do
-  if printf '%s' "$a" | grep -qE '^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F]*:[0-9a-fA-F:]+(/[0-9]{1,3})?)$'; then
-    TG_OK="${TG_OK:+$TG_OK,}$a"
-  else
-    bad "не похоже на IP: «$a» — в белый список не добавляю"
-  fi
-done
-TG_ALLOW="$TG_OK"
+ask_tg_allow
 
 if [ "$SITE_ONLY" != "1" ]; then
 ask NEW_HOSTNAME "Новое имя сервера (Enter — оставить $(hostname))" ""
@@ -5027,240 +5294,7 @@ fi
 # =============================================================================
 nstep "TrafficGuard"
 # =============================================================================
-if [ "$DO_TG" != "1" ]; then
-  warn "пропущено (--no-traffic-guard)"
-elif [ -x /usr/local/bin/traffic-guard ] && [ "$TG_FORCE" != "1" ]; then
-  warn "на ноде уже стоит свой traffic-guard — не трогаю (--tg-force поставит наш рядом)"
-else
-  apt-get install -y -qq ipset >/dev/null 2>&1
-  if ! command -v ipset >/dev/null 2>&1; then
-    err "ipset не установился — TrafficGuard не поставить"
-  else
-    mkdir -p /etc/traffic-guard/lists /var/lib/traffic-guard
-
-    # --- белый список: панель, текущий SSH-клиент и всё, что дали флагом ---
-    TG_ALLOW_FILE=/etc/traffic-guard/allow.list
-    if [ ! -f "$TG_ALLOW_FILE" ]; then
-      cat > "$TG_ALLOW_FILE" <<'ALLOWHDR'
-# Исключения TrafficGuard: эти адреса никогда не блокируются.
-# Сюда IP панели и других нод. По одному на строку, можно CIDR.
-# Менять удобнее командой:  tg-allow add 1.2.3.4 "панель"
-ALLOWHDR
-    fi
-    SSH_PEER="$(echo "${SSH_CLIENT:-}" | awk '{print $1}')"
-    for a in $PANEL_IP $SSH_PEER $(printf '%s' "$TG_ALLOW" | tr ',;' '  '); do
-      [ -z "$a" ] && continue
-      grep -qxF "$a" "$TG_ALLOW_FILE" 2>/dev/null || echo "$a" >> "$TG_ALLOW_FILE"
-    done
-    ok "в белом списке: $(grep -cvE '^\s*(#|$)' "$TG_ALLOW_FILE") адресов"
-
-    # --- обновление списков и применение правил ---
-    cat > /usr/local/bin/tg-refresh <<'TGREFRESH'
-#!/bin/sh
-# TrafficGuard: качает блок-листы, собирает ipset и вешает цепочку в INPUT.
-# Белый список всегда имеет приоритет над блок-листом.
-#   tg-refresh              полное обновление
-#   tg-refresh --allow-only только перечитать белый список
-#   tg-refresh --hook-only  только пересобрать цепочку и вернуть её в INPUT
-set -u
-DIR=/etc/traffic-guard
-LISTS=$DIR/lists
-ALLOW=$DIR/allow.list
-SAVE=/var/lib/traffic-guard/ipset.save
-SRC="https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/main/public/antiscanner.list
-https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/main/public/government_networks.list"
-MODE="${1:-full}"
-
-mkdir -p "$LISTS" /var/lib/traffic-guard
-[ -f "$ALLOW" ] || : > "$ALLOW"
-
-fill() {   # fill ИМЯ_СЕТА СЕМЕЙСТВО ФАЙЛЫ...
-  set_name="$1"; fam="$2"; shift 2
-  ipset create "$set_name" hash:net family "$fam" -exist
-  ipset create "${set_name}-tmp" hash:net family "$fam" -exist
-  ipset flush "${set_name}-tmp"
-  n=0
-  if [ "$fam" = inet ]; then
-    pat='^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'
-  else
-    pat='^[0-9a-fA-F:]+(/[0-9]{1,3})?$'
-  fi
-  for f in "$@"; do
-    [ -f "$f" ] || continue
-    sed 's/#.*//' "$f" | tr -d ' \t\r' | grep -E "$pat" | while IFS= read -r net; do
-      ipset add "${set_name}-tmp" "$net" -exist 2>/dev/null
-    done
-  done
-  n="$(ipset list "${set_name}-tmp" | grep -cE "$pat")"
-  ipset swap "${set_name}-tmp" "$set_name"
-  ipset destroy "${set_name}-tmp"
-  echo "$n"
-}
-
-if [ "$MODE" = "full" ]; then
-  for u in $SRC; do
-    f="$LISTS/$(basename "$u")"
-    if curl -fsSL --max-time 90 "$u" -o "$f.new" && [ -s "$f.new" ]; then
-      mv "$f.new" "$f"
-    else
-      rm -f "$f.new"
-      echo "tg-refresh: не смог скачать $u, оставляю прежний список" >&2
-    fi
-  done
-fi
-
-if [ "$MODE" != "hook-only" ]; then
-  A4="$(fill TG-ALLOW-V4 inet "$ALLOW")"
-  A6="$(fill TG-ALLOW-V6 inet6 "$ALLOW")"
-  B4="$(fill TG-BLOCK-V4 inet "$LISTS"/*.list)"
-  B6="$(fill TG-BLOCK-V6 inet6 "$LISTS"/*.list)"
-  echo "tg-refresh: блок v4=$B4 v6=$B6, разрешено v4=$A4 v6=$A6"
-else
-  for s in TG-ALLOW-V4 TG-BLOCK-V4; do ipset create "$s" hash:net family inet -exist; done
-  for s in TG-ALLOW-V6 TG-BLOCK-V6; do ipset create "$s" hash:net family inet6 -exist; done
-fi
-
-# цепочка: сначала пропускаем своих (RETURN — трафик идёт дальше по правилам
-# ufw, а не проскакивает мимо них), только потом рубим сканеры
-iptables -N TRAFFIC-GUARD 2>/dev/null
-iptables -F TRAFFIC-GUARD
-iptables -A TRAFFIC-GUARD -m set --match-set TG-ALLOW-V4 src -j RETURN
-iptables -A TRAFFIC-GUARD -m set --match-set TG-BLOCK-V4 src -j DROP
-while iptables -D INPUT -j TRAFFIC-GUARD 2>/dev/null; do :; done
-iptables -I INPUT 1 -j TRAFFIC-GUARD
-# и в FORWARD: трафик, который сервер пересылает дальше (DNAT :443 на ноду
-# на другом сервере, контейнеры в сети docker), идёт мимо INPUT
-while iptables -D FORWARD -j TRAFFIC-GUARD 2>/dev/null; do :; done
-iptables -I FORWARD 1 -j TRAFFIC-GUARD
-
-if command -v ip6tables >/dev/null 2>&1; then
-  ip6tables -N TRAFFIC-GUARD 2>/dev/null
-  ip6tables -F TRAFFIC-GUARD
-  ip6tables -A TRAFFIC-GUARD -m set --match-set TG-ALLOW-V6 src -j RETURN
-  ip6tables -A TRAFFIC-GUARD -m set --match-set TG-BLOCK-V6 src -j DROP
-  while ip6tables -D INPUT -j TRAFFIC-GUARD 2>/dev/null; do :; done
-  ip6tables -I INPUT 1 -j TRAFFIC-GUARD
-  while ip6tables -D FORWARD -j TRAFFIC-GUARD 2>/dev/null; do :; done
-  ip6tables -I FORWARD 1 -j TRAFFIC-GUARD
-fi
-
-ipset save > "$SAVE" 2>/dev/null
-exit 0
-TGREFRESH
-    chmod +x /usr/local/bin/tg-refresh
-
-    # --- управление исключениями ---
-    cat > /usr/local/bin/tg-allow <<'TGALLOW'
-#!/bin/sh
-# Исключения TrafficGuard.
-#   tg-allow add 1.2.3.4 [комментарий]   добавить
-#   tg-allow del 1.2.3.4                 убрать
-#   tg-allow list                        показать
-#   tg-allow test 1.2.3.4                проверить, блокируется ли адрес
-set -u
-F=/etc/traffic-guard/allow.list
-[ -f "$F" ] || : > "$F"
-case "${1:-list}" in
-  add)
-    [ -n "${2:-}" ] || { echo "нужен адрес: tg-allow add 1.2.3.4 [комментарий]"; exit 1; }
-    if grep -qxF "$2" "$F"; then
-      echo "$2 уже в списке"
-    else
-      [ -n "${3:-}" ] && echo "# $3" >> "$F"
-      echo "$2" >> "$F"
-      echo "добавлен $2"
-    fi
-    /usr/local/bin/tg-refresh --allow-only
-    ;;
-  del)
-    [ -n "${2:-}" ] || { echo "нужен адрес"; exit 1; }
-    grep -vxF "$2" "$F" > "$F.tmp" && mv "$F.tmp" "$F"
-    echo "убран $2"
-    /usr/local/bin/tg-refresh --allow-only
-    ;;
-  test)
-    [ -n "${2:-}" ] || { echo "нужен адрес"; exit 1; }
-    if ipset test TG-ALLOW-V4 "$2" 2>/dev/null; then
-      echo "$2: в белом списке, не блокируется"
-    elif ipset test TG-BLOCK-V4 "$2" 2>/dev/null; then
-      echo "$2: БЛОКИРУЕТСЯ (добавь: tg-allow add $2)"
-    else
-      echo "$2: не в списках, проходит обычные правила"
-    fi
-    ;;
-  *)
-    echo "белый список ($F):"
-    grep -vE '^\s*$' "$F" | sed 's/^/  /'
-    echo
-    echo "в ipset: $(ipset list TG-ALLOW-V4 2>/dev/null | grep -cE '^[0-9]') адресов"
-    echo "в блок-листе: $(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]') сетей"
-    ;;
-esac
-TGALLOW
-    chmod +x /usr/local/bin/tg-allow
-
-    # --- systemd: восстановление после перезагрузки и ежедневное обновление ---
-    cat > /etc/systemd/system/tg-apply.service <<'UNIT'
-[Unit]
-Description=TrafficGuard: восстановить ipset и вернуть цепочку в INPUT
-After=network.target ufw.service docker.service
-Wants=network.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh -c '[ -f /var/lib/traffic-guard/ipset.save ] && ipset restore -exist < /var/lib/traffic-guard/ipset.save || true'
-ExecStart=/usr/local/bin/tg-refresh --hook-only
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-    cat > /etc/systemd/system/tg-refresh.service <<'UNIT'
-[Unit]
-Description=TrafficGuard: обновление блок-листов
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/tg-refresh
-UNIT
-
-    cat > /etc/systemd/system/tg-refresh.timer <<'UNIT'
-[Unit]
-Description=TrafficGuard: ежедневное обновление блок-листов
-
-[Timer]
-OnCalendar=daily
-RandomizedDelaySec=3h
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-UNIT
-
-    systemctl daemon-reload >/dev/null 2>&1
-    systemctl enable --now tg-apply.service >/dev/null 2>&1
-    systemctl enable --now tg-refresh.timer >/dev/null 2>&1
-
-    TG_OUT="$(/usr/local/bin/tg-refresh 2>&1 | tail -1)"
-    ok "${TG_OUT:-правила применены}"
-
-    # --- контроль: свои адреса не должны блокироваться ---
-    TG_BAD=""
-    for a in $PANEL_IP $SSH_PEER; do
-      [ -z "$a" ] && continue
-      if ipset test TG-ALLOW-V4 "$a" >/dev/null 2>&1; then
-        ok "$a в белом списке"
-      else
-        TG_BAD="$TG_BAD $a"
-      fi
-    done
-    [ -n "$TG_BAD" ] && err "не попали в белый список:$TG_BAD — добавь через tg-allow add"
-    ok "исключения: tg-allow add <ip> | tg-allow list | tg-allow test <ip>"
-  fi
-fi
+install_traffic_guard
 
 if [ "$SITE_ONLY" != "1" ]; then
 # =============================================================================
