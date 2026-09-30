@@ -6,6 +6,7 @@
 #     bash node-setup.sh                      # спросит SECRET_KEY и остальное
 #     bash node-setup.sh --status-only        # только отчёт, ничего не менять
 #     bash node-setup.sh --secret 'КЛЮЧ' --panel-ip 203.0.113.10 --yes
+#     bash node-setup.sh --site-only --domain example.com   # только заглушка и сертификат
 #
 #  Сначала показывает: кто и откуда заходил, что за программы работают,
 #  какие порты открыты, сколько ресурсов. Потом настраивает ноду с нуля.
@@ -64,6 +65,14 @@ DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; D
 # иначе панель или соседняя нода попадут под раздачу
 TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
 SET_NODE_VER=""; BUSY_OK=0; NODE_PORT_FORCED=0; FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
+# --site-only: только сертификат, сайт-заглушка и nginx. Нода, её ключ и порт,
+# фаервол (кроме 80/443 под выпуск сертификата) и система не трогаются
+SITE_ONLY=0
+# наш docker-compose.yml узнаём по этой строке: его можно переписывать.
+# NGINX_COMPOSE — nginx отдельным файлом рядом с чужим compose ноды (--site-only);
+# каталог тот же, значит и проект compose тот же — контейнер не задвоится
+COMPOSE_MARK="# generated-by: node-setup"
+NGINX_COMPOSE="docker-compose.nginx.yml"
 # Yandex CDN: nginx на :443, Xray XHTTP на loopback.
 CDN_ORIGIN="${CDN_ORIGIN:-}"; CDN_PUBLIC="${CDN_PUBLIC:-}"; CDN_PATH="${CDN_PATH:-}"
 CDN_XRAY_PORT="${CDN_XRAY_PORT:-}"; CDN_EDGE_HEADER="${CDN_EDGE_HEADER:-X-Cdn-Secret}"
@@ -160,6 +169,9 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --force-site         перезаписать уже существующие сайты-заглушки
   --no-nginx           не ставить nginx и не выпускать сертификат
   --no-site            не трогать сайт-заглушку
+  --site-only          только сертификат и сайт-заглушка с nginx: ноду, её ключ
+                       и порт, фаервол и систему не трогать (нужен --domain
+                       или ответ на вопрос о домене)
   --tg-allow <ips>     исключения TrafficGuard: IP панели, других нод, свои
                        (через запятую; IP панели и текущий SSH добавятся сами)
   --no-traffic-guard   не ставить TrafficGuard
@@ -218,6 +230,7 @@ while [ $# -gt 0 ]; do
     --force-site)  FORCE_SITE=1; shift;;
     --no-nginx)    DO_NGINX=0; shift;;
     --no-site)     DO_SITE=0; shift;;
+    --site-only)   SITE_ONLY=1; NO_STATUS=1; shift;;
     --tg-allow)    TG_ALLOW="${2:-}"; shift 2;;
     --no-traffic-guard) DO_TG=0; shift;;
     --tg-force)    TG_FORCE=1; shift;;
@@ -391,6 +404,17 @@ site_root() {
 }
 
 has_cert() { [ -f "/etc/letsencrypt/live/$1/fullchain.pem" ]; }
+
+# Let's Encrypt проверяет домен по :80, клиенты ходят на :443. Выключенный ufw
+# не включаем: без правил для SSH и панели он отрезал бы и их
+open_web_ports() {
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw allow 80/tcp comment 'certbot' >/dev/null 2>&1
+    ufw allow 443/tcp comment 'VPN tls' >/dev/null 2>&1
+    ok "ufw: 80/tcp и 443/tcp открыты"
+  fi
+  say "  фаервол у хостера (панель провайдера) скрипт открыть не может — там 80 и 443 тоже должны быть открыты"
+}
 
 # адреса этого сервера: IPv4 на интерфейсах плюс внешний (api.ipify.org).
 # Сравнивать A-запись только с внешним нельзя: у сервера бывает несколько IP,
@@ -571,7 +595,7 @@ menu_ports() {
 menu_items() {
   local L R i
   L=("НОДА" " 1|состояние подробно" " 2|настроить или обновить" " 8|заглушка: пересобрать"
-     "" "ДОМЕНЫ (SNI)" "13|добавить домен" "14|убрать домен"
+     "17|заглушка и сертификат" "" "ДОМЕНЫ (SNI)" "13|добавить домен" "14|убрать домен"
      "15|сменить версию ноды" "" "СКРИПТ" "10|обновить с гитхаба" "16|тесты VPS")
   R=("СЕТЬ" " 3|WARP: включить" " 4|WARP: выключить" " 5|WARP: снести" " 9|WARP: outbound для панели"
      " 6|BBR и сетевые лимиты" " 7|TrafficGuard: бан и исключения"
@@ -614,14 +638,13 @@ menu_main() {
       7)  menu_tg ;;
       8)  D="$(conf_domains | tr ' ' ',')"
           if [ -z "$D" ]; then
-            warn "домен не найден — сначала настрой ноду (пункт 2)"
+            warn "домен не найден — сначала пункт 17 (заглушка и сертификат) или 2"
           else
             say "  доступные стили:"
             printf '%s\n' "$ALL_PRESETS_HINT" | fold -s -w 76 | sed 's/^/    /'
             printf '%b' "${CC}?${C0} стиль (Enter — случайный): "
             IFS= read -r st < "$TTY_IN"
-            bash "$SELF" --no-status --no-upgrade --no-swap --no-ufw --no-fail2ban --no-traffic-guard --no-motd --no-warp \
-                 --domain "$D" --force-site ${st:+--site-theme "$st"} --yes
+            bash "$SELF" --site-only --no-ufw --domain "$D" --force-site ${st:+--site-theme "$st"} --yes
           fi ;;
       9)  if [ -f "$INSTALL_DIR/warp-outbound.json" ]; then
             say "  вставь это в outbounds конфига ноды в панели:"
@@ -644,6 +667,7 @@ menu_main() {
       14) menu_del_sni ;;
       15) change_node_version ;;
       16) menu_tests ;;
+      17) bash "$SELF" --site-only ;;
       0|q|"") say "пока"; return 0 ;;
       *)  warn "нет такого пункта" ;;
     esac
@@ -654,18 +678,17 @@ menu_main() {
 }
 
 # перенастроить ноду под новый список доменов: сертификаты, сайты, nginx.
-# Фаервол, пакеты и прочее не трогаем: ufw в таком прогоне не знает IP панели
-# и открыл бы порт ноды всем
+# Через --site-only: ноду не перезапускаем, а IP панели, порт ноды и остальной
+# фаервол не трогаем — в ufw откроются только 80/443, и то если нужен выпуск
 sni_apply() {
-  bash "$SELF" --no-status --no-upgrade --no-swap --no-ufw --no-fail2ban --no-bbr \
-       --no-traffic-guard --no-motd --no-warp --domain "$(printf '%s' "$1" | tr ' ' ',')" --yes
+  bash "$SELF" --site-only --domain "$(printf '%s' "$1" | tr ' ' ',')" --yes
 }
 
 menu_add_sni() {
   local cur nd new d ip res
   cur="$(conf_domains)"
   if [ -z "$cur" ]; then
-    warn "домены ещё не настроены — сначала пункт 2"
+    warn "домены ещё не настроены — сначала пункт 17 (заглушка и сертификат) или 2"
     return 0
   fi
   local nocert=""
@@ -700,14 +723,7 @@ menu_add_sni() {
     fi
   done
 
-  # Let's Encrypt проверяет домен по :80, клиенты ходят на :443
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
-    ufw allow 80/tcp comment 'certbot' >/dev/null 2>&1
-    ufw allow 443/tcp comment 'VPN tls' >/dev/null 2>&1
-    ok "ufw: 80/tcp и 443/tcp открыты"
-  fi
-  say "  фаервол у хостера (панель провайдера) скрипт открыть не может — там 80 и 443 тоже должны быть открыты"
-
+  # 80/443 в ufw откроет сам прогон перед выпуском сертификата (open_web_ports)
   confirm "Добавить:$new?" y || { warn "отменено"; return 0; }
   sni_apply "$(norm_domains "$cur $new")"
   say ""
@@ -2316,6 +2332,28 @@ export NEEDRESTART_SUSPEND=1
 
 mkdir -p "$INSTALL_DIR"
 
+# --- что ставим. Спрашиваем, пока ноды нет: на готовой ноде заглушка
+# с сертификатом — отдельный пункт меню begleq (17) ---
+if [ "$SITE_ONLY" != "1" ] && interactive && ! docker inspect remnanode >/dev/null 2>&1; then
+  say ""
+  say "  Что настраиваем:"
+  say "    ${CC}${CB}1${C0}  ноду целиком: система, фаервол, нода Remnawave, nginx, заглушка, сертификат"
+  say "    ${CC}${CB}2${C0}  только сайт-заглушку и сертификат — ноду, фаервол и систему не трогаю"
+  SETUP_MODE=""
+  while :; do
+    ask SETUP_MODE "Вариант" "1"
+    case "$SETUP_MODE" in 1) break ;; 2) SITE_ONLY=1; break ;; esac
+    bad "нет такого варианта: $SETUP_MODE"; SETUP_MODE=""
+  done
+fi
+if [ "$SITE_ONLY" = "1" ]; then
+  [ "$DO_NGINX" = "1" ] || die "--site-only и --no-nginx вместе: ставить нечего"
+  # nginx под CDN держит :443 и слушает не тот сокет — self-steal заглушка его бы затёрла
+  cdn_mode && die "на ноде настроен Yandex CDN (begleq → 11) — заглушка self-steal с ним не совмещается"
+  DO_UPGRADE=0
+fi
+
+if [ "$SITE_ONLY" != "1" ]; then
 # --- SECRET_KEY: валидный существующий не трогаем ---
 EXIST_KEY=""
 [ -f "$INSTALL_DIR/.env" ] && EXIST_KEY="$(grep -E '^[[:space:]]*SECRET_KEY=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'\''[:space:]')"
@@ -2417,6 +2455,7 @@ case "$NODE_IMAGE" in
   *:latest) warn "берётся latest — при следующем обновлении может разойтись с панелью" ;;
 esac
 [ -n "$OLD_IMAGE" ] && [ "$OLD_IMAGE" != "$NODE_IMAGE" ] && warn "образ меняется: $OLD_IMAGE → $NODE_IMAGE"
+fi   # SITE_ONLY: ключ, порт и версия ноды
 
 # --- домен self-steal: он же для сертификата и сайта-заглушки ---
 if [ "$DO_NGINX" = "1" ]; then
@@ -2428,7 +2467,9 @@ if [ "$DO_NGINX" = "1" ]; then
     say "  A-запись должна уже указывать на этот сервер. Можно несколько"
     say "  доменов через запятую — каждый станет отдельным SNI со своим"
     say "  сертификатом и своим сайтом; первый — основной."
-    if [ -n "$OLD_DOMAINS" ]; then
+    if [ "$SITE_ONLY" = "1" ]; then
+      [ -n "$OLD_DOMAINS" ] && say "  Enter — оставить как есть ($OLD_DOMAINS)."
+    elif [ -n "$OLD_DOMAINS" ]; then
       say "  Enter — оставить как есть ($OLD_DOMAINS), «-» — без nginx и заглушки."
     else
       say "  Enter — пропустить, тогда поднимется только нода без nginx и заглушки."
@@ -2445,7 +2486,9 @@ if [ "$DO_NGINX" = "1" ]; then
   for d in $DOMAINS; do
     printf '%s' "$d" | grep -qE '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$' || die "не похоже на домен: $d"
   done
-  if [ -z "$DOMAIN" ]; then
+  if [ -z "$DOMAIN" ] && [ "$SITE_ONLY" = "1" ]; then
+    die "домен не задан — без него сертификат и заглушку не поставить"
+  elif [ -z "$DOMAIN" ]; then
     DO_NGINX=0
     warn "домен не задан — nginx, сертификат и сайт пропускаются"
   else
@@ -2475,6 +2518,7 @@ if [ "$DO_NGINX" = "1" ]; then
   fi
 fi
 
+if [ "$SITE_ONLY" != "1" ]; then
 # --- IP панели: как SECRET_KEY — сохранённый предлагаем оставить ---
 # хранится в $INSTALL_DIR/panel_ip; на нодах, поставленных до этого файла,
 # берём из правила ufw «remnawave panel»
@@ -2510,9 +2554,19 @@ fi
 
 ask NEW_HOSTNAME "Новое имя сервера (Enter — оставить $(hostname))" ""
 ask TIMEZONE     "Часовой пояс" "Europe/Moscow"
+fi   # SITE_ONLY: панель, TrafficGuard, имя и часовой пояс
 
 say ""
 say "  ${CB}Итого:${C0}"
+if [ "$SITE_ONLY" = "1" ]; then
+say "     режим       только сайт-заглушка и сертификат"
+say "                 ${CD}нода, её ключ и порт, фаервол и система не трогаются${C0}"
+say "     домены      $DOMAINS"
+say "     почта LE    $EMAIL"
+say "     каталог     $INSTALL_DIR"
+# Xray на :443 не наш и не нужен: nginx слушает только сокет и :80
+check_ports "tcp:80:remnawave-nginx:nginx: редирект и сертификаты"
+else
 say "     каталог     $INSTALL_DIR"
 say "     порт ноды   $NODE_PORT  (панель: ${PANEL_IP:-любой IP})"
 say "     SSH-порт    $SSH_PORT (для правила ufw)"
@@ -2530,26 +2584,35 @@ if [ "$DO_NGINX" = "1" ]; then
   PORTS_PLAN+=("tcp:80:remnawave-nginx:nginx: редирект и сертификаты")
 fi
 check_ports "${PORTS_PLAN[@]}"
+fi   # SITE_ONLY: итого и порты
 
 if ! confirm "Начинать настройку?" y; then
   if interactive; then die "отменено"; fi
   die "нет терминала для подтверждения — запусти из консоли сервера либо добавь --yes"
 fi
 
-# IP панели запоминаем сразу: в следующий раз его не придётся вводить
+# IP панели запоминаем сразу: в следующий раз его не придётся вводить.
+# В --site-only его не спрашивали — сохранённый не трогаем
 mkdir -p "$INSTALL_DIR"
-if [ -n "$PANEL_IP" ]; then
-  printf '%s\n' "$PANEL_IP" > "$INSTALL_DIR/panel_ip"
-else
-  rm -f "$INSTALL_DIR/panel_ip"
+if [ "$SITE_ONLY" != "1" ]; then
+  if [ -n "$PANEL_IP" ]; then
+    printf '%s\n' "$PANEL_IP" > "$INSTALL_DIR/panel_ip"
+  else
+    rm -f "$INSTALL_DIR/panel_ip"
+  fi
 fi
 
 # #############################################################################
 part "ЧАСТЬ 3: настройка"
 # #############################################################################
+# шаги нумеруются по ходу: в --site-only их меньше, чем в полной настройке
+S_NUM=0; S_ALL=14
+[ "$SITE_ONLY" = "1" ] && S_ALL=6
+nstep() { S_NUM=$((S_NUM + 1)); step "$S_NUM/$S_ALL  $*"; }
 
+if [ "$SITE_ONLY" != "1" ]; then
 # =============================================================================
-step "1/14  Имя, часовой пояс, время"
+nstep "Имя, часовой пояс, время"
 # =============================================================================
 if [ -n "$NEW_HOSTNAME" ] && [ "$NEW_HOSTNAME" != "$(hostname)" ]; then
   if hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null; then
@@ -2563,9 +2626,10 @@ else
   ok "часовой пояс: $(timedatectl show -p Timezone --value 2>/dev/null)"
 fi
 timedatectl set-ntp true >/dev/null 2>&1
+fi   # SITE_ONLY
 
 # =============================================================================
-step "2/14  Пакеты"
+nstep "Пакеты"
 # =============================================================================
 apt-get update -qq 2>/dev/null && ok "apt update" || err "apt update не прошёл"
 if [ "$DO_UPGRADE" = "1" ]; then
@@ -2574,10 +2638,13 @@ if [ "$DO_UPGRADE" = "1" ]; then
     && ok "пакеты обновлены" || warn "upgrade прошёл с замечаниями"
 fi
 PKGS="curl ca-certificates gnupg jq unzip tar htop ufw chrony net-tools dnsutils"
+# заглушке хватает curl: chrony, например, на Ubuntu вытесняет timesyncd
+[ "$SITE_ONLY" = "1" ] && PKGS="curl ca-certificates"
 apt-get install -y -qq $PKGS >/dev/null 2>&1 && ok "базовые пакеты на месте" || warn "часть пакетов не поставилась"
 
+if [ "$SITE_ONLY" != "1" ]; then
 # =============================================================================
-step "3/14  Swap"
+nstep "Swap"
 # =============================================================================
 RAM_MB="$(free -m | awk '/^Mem:/{print $2}')"
 SWAP_MB="$(free -m | awk '/^Swap:/{print $2}')"
@@ -2593,20 +2660,23 @@ else
 fi
 
 # =============================================================================
-step "4/14  Сетевые лимиты и BBR"
+nstep "Сетевые лимиты и BBR"
 # =============================================================================
 if [ "$DO_BBR" != "1" ]; then
   warn "пропущено (--no-bbr)"
 else
   enable_bbr
 fi
+fi   # SITE_ONLY
 
 # =============================================================================
-step "5/14  Docker"
+nstep "Docker"
 # =============================================================================
+DOCKER_FRESH=0
 if command -v docker >/dev/null 2>&1; then
   ok "docker уже стоит: $(docker --version | awk '{print $3}' | tr -d ,)"
 else
+  DOCKER_FRESH=1
   DLOG=/var/log/begleq-docker-install.log
   : > "$DLOG"
   # get.docker.com ставит docker-ce вместе с плагином compose. Иногда падает на
@@ -2653,7 +2723,10 @@ fi
 docker compose version >/dev/null 2>&1 && ok "docker compose v2 на месте" || err "нет docker compose v2 — нода не поднимется"
 systemctl enable --now docker >/dev/null 2>&1
 
-if [ ! -f /etc/docker/daemon.json ]; then
+if [ ! -f /etc/docker/daemon.json ] && [ "$SITE_ONLY" = "1" ] && [ "$DOCKER_FRESH" != "1" ]; then
+  # для ротации логов docker пришлось бы перезапустить, а с ним и ноду
+  warn "ротацию логов docker не настраиваю: рестарт docker перезапустил бы все контейнеры"
+elif [ ! -f /etc/docker/daemon.json ]; then
   mkdir -p /etc/docker
   cat > /etc/docker/daemon.json <<'DJSON'
 {
@@ -2666,8 +2739,9 @@ else
   ok "/etc/docker/daemon.json уже есть — не трогаю"
 fi
 
+if [ "$SITE_ONLY" != "1" ]; then
 # =============================================================================
-step "6/14  Фаервол и fail2ban"
+nstep "Фаервол и fail2ban"
 # =============================================================================
 if [ "$DO_UFW" != "1" ]; then
   warn "ufw пропущен по флагу"
@@ -2751,9 +2825,10 @@ F2B
     systemctl enable --now fail2ban >/dev/null 2>&1 && ok "fail2ban сторожит SSH" || warn "fail2ban не стартовал"
   else warn "fail2ban не поставился"; fi
 fi
+fi   # SITE_ONLY
 
 # =============================================================================
-step "7/14  Сертификат Let's Encrypt"
+nstep "Сертификат Let's Encrypt"
 # =============================================================================
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 if [ "$DO_NGINX" != "1" ]; then
@@ -2771,6 +2846,8 @@ else
     fi
   done
   if [ -n "$NEED_CERT" ]; then
+    # в --site-only фаервол не настраивался (шаг пропущен), а без :80 не выпустить
+    [ "$SITE_ONLY" = "1" ] && [ "$DO_UFW" = "1" ] && open_web_ports
     command -v certbot >/dev/null 2>&1 || apt-get install -y -qq certbot >/dev/null 2>&1
     # на повторном запуске :80 уже держит наш nginx и отдаёт ACME-челлендж —
     # тогда standalone упал бы, выпускаем через webroot без остановки nginx
@@ -2822,7 +2899,7 @@ HOOK
 fi
 
 # =============================================================================
-step "8/14  Сайт-заглушка"
+nstep "Сайт-заглушка"
 # =============================================================================
 # собирает заглушку для домена $DOMAIN в каталоге $WEBROOT по стилю $SITE_THEME;
 # на выходе SITE_NAME и SITE_THEME (итоговый пресет)
@@ -4305,7 +4382,7 @@ $d|$WEBROOT|$SITE_NAME|$SITE_THEME"
 fi
 
 # =============================================================================
-step "9/14  nginx"
+nstep "nginx"
 # =============================================================================
 # пишет nginx.conf по доменам с сертификатом; зовётся и повторно — когда
 # недостающий сертификат выпустился уже через поднятый nginx
@@ -4459,20 +4536,107 @@ NGINX
   return 0
 }
 
+# сервис nginx для compose — один и тот же в полной настройке и в --site-only
+nginx_service_yaml() {
+  cat <<COMPOSE
+  remnawave-nginx:
+    image: $NGINX_IMAGE
+    container_name: remnawave-nginx
+    hostname: remnawave-nginx
+    restart: always
+    network_mode: host
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    logging:
+      driver: json-file
+      options: { max-size: 100m, max-file: "5" }
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - $WEBROOT:$WEBROOT:ro
+      - $SITES_ROOT:$SITES_ROOT:ro
+      - /var/www/certbot:/var/www/certbot:ro
+      - /dev/shm:/dev/shm:rw
+    # воркеры под root: иначе они (юзер nginx) не могут писать в unix-сокеты
+    # Xray (xrxh/xrws, права 755) и XHTTP/WS-локейшны отдают 502.
+    # В штатном nginx.conf образа worker_connections 1024, а через nginx идёт
+    # весь XHTTP/WS и каждый клиент занимает два соединения (к нему и к Xray) —
+    # под нагрузкой лимит кончается: «1024 worker_connections are not enough»
+    command: sh -c 'sed -i -e "s/^user .*/user root;/" -e "s/worker_connections[[:space:]]*[0-9]*;/worker_connections 65535;/" /etc/nginx/nginx.conf; grep -q worker_rlimit_nofile /etc/nginx/nginx.conf || sed -i "/^worker_processes/a worker_rlimit_nofile 1048576;" /etc/nginx/nginx.conf; rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
+COMPOSE
+}
+
+# --site-only: поднять один nginx, не трогая ноду. В нашем compose переписываем
+# только блок nginx; чужой compose ноды не трогаем, а nginx кладём рядом
+# отдельным файлом — каталог тот же, значит проект тот же, и полная настройка
+# потом просто заберёт этот контейнер в общий compose. NG_F — этот файл
+NG_F=""
+site_only_nginx_up() {
+  local cf="$INSTALL_DIR/docker-compose.yml" st i
+  if [ -f "$cf" ] && grep -qF "$COMPOSE_MARK" "$cf"; then
+    cp -a "$cf" "$cf.bak.$STAMP" || { err "не смог сделать бэкап $cf — compose не трогаю"; return 0; }
+    # всё до блока nginx (он в нашем файле последний) без хвостовых пустых строк
+    { awk '/^  remnawave-nginx:/ {exit} {l[++n] = $0} NF {last = n} END {for (i = 1; i <= last; i++) print l[i]}' "$cf.bak.$STAMP"
+      printf '\n'; nginx_service_yaml; } > "$cf.new"
+    # блок ноды обязан пережить правку: если файл правили руками и nginx
+    # стоит выше ноды, отрезалось бы лишнее — тогда не трогаем ничего
+    if grep -q '^  remnanode:' "$cf.bak.$STAMP" && ! grep -q '^  remnanode:' "$cf.new"; then
+      rm -f "$cf.new"
+      err "в $cf блок nginx не последний — не переписываю, поправь файл или запусти полную настройку (begleq → 2)"
+      return 0
+    fi
+    mv -f "$cf.new" "$cf"
+    rm -f "$INSTALL_DIR/$NGINX_COMPOSE"
+    ok "docker-compose.yml: обновлён только nginx, нода не тронута (бэкап $cf.bak.$STAMP)"
+  elif [ -f "$cf" ] && grep -qE '^  remnawave-nginx:' "$cf"; then
+    warn "в docker-compose.yml свой remnawave-nginx — файл не трогаю, только перезапускаю nginx"
+    [ "$DOMAINS" != "$DOMAIN" ] && warn "сайты доп. доменов лежат в $SITES_ROOT — примонтируй его в свой nginx"
+  else
+    NG_F="$NGINX_COMPOSE"
+    { printf '%s\nservices:\n' "$COMPOSE_MARK"; nginx_service_yaml; } > "$INSTALL_DIR/$NG_F"
+    if [ -f "$cf" ]; then
+      ok "compose ноды не трогаю — nginx описан отдельно: $INSTALL_DIR/$NG_F"
+    else
+      ok "nginx описан в $INSTALL_DIR/$NG_F"
+    fi
+  fi
+
+  if (cd "$INSTALL_DIR" && docker compose ${NG_F:+-f "$NG_F"} up -d remnawave-nginx >/dev/null 2>&1); then
+    ok "контейнер remnawave-nginx поднят"
+  else
+    err "docker compose up для nginx упал — смотри: cd $INSTALL_DIR && docker compose ${NG_F:+-f $NG_F }up -d remnawave-nginx"
+    return 0
+  fi
+  # nginx мог крутиться в перезапусках, пока не было сертификата: docker
+  # наращивает паузу между попытками — перезапускаем сами и ждём
+  st="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
+  if [ "$st" != "running" ]; then
+    docker restart remnawave-nginx >/dev/null 2>&1
+    i=0
+    while [ "$i" -lt 15 ]; do
+      st="$(docker inspect -f '{{.State.Status}}' remnawave-nginx 2>/dev/null)"
+      [ "$st" = "running" ] && break
+      sleep 2; i=$((i + 1))
+    done
+  fi
+  return 0
+}
+
 if [ "$DO_NGINX" != "1" ]; then
   warn "пропущено: домен не задан"
 else
   write_nginx_conf
+  [ "$SITE_ONLY" = "1" ] && site_only_nginx_up
 fi
 
+if [ "$SITE_ONLY" != "1" ]; then
 # =============================================================================
-step "10/14  Нода Remnawave"
+nstep "Нода Remnawave"
 # =============================================================================
 cd "$INSTALL_DIR" || die "нет $INSTALL_DIR"
 
 # если в compose уже есть посторонние сервисы — это боевая нода со своей
 # обвязкой, её файл трогать нельзя
-COMPOSE_MARK="# generated-by: node-setup"
 OTHER_SVC=""
 if [ -f docker-compose.yml ]; then
   # свой же файл (с нашим маркером) переписывать можно — там наш nginx,
@@ -4529,33 +4693,10 @@ COMPOSE
   # nginx нужен только в связке с доменом: он отдаёт сайт-заглушку и
   # проксирует путь Xray с unix-сокета
   if [ "$DO_NGINX" = "1" ]; then
-    cat >> docker-compose.yml <<COMPOSE
-
-  remnawave-nginx:
-    image: $NGINX_IMAGE
-    container_name: remnawave-nginx
-    hostname: remnawave-nginx
-    restart: always
-    network_mode: host
-    ulimits:
-      nofile: { soft: 1048576, hard: 1048576 }
-    logging:
-      driver: json-file
-      options: { max-size: 100m, max-file: "5" }
-    volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-      - $WEBROOT:$WEBROOT:ro
-      - $SITES_ROOT:$SITES_ROOT:ro
-      - /var/www/certbot:/var/www/certbot:ro
-      - /dev/shm:/dev/shm:rw
-    # воркеры под root: иначе они (юзер nginx) не могут писать в unix-сокеты
-    # Xray (xrxh/xrws, права 755) и XHTTP/WS-локейшны отдают 502.
-    # В штатном nginx.conf образа worker_connections 1024, а через nginx идёт
-    # весь XHTTP/WS и каждый клиент занимает два соединения (к нему и к Xray) —
-    # под нагрузкой лимит кончается: «1024 worker_connections are not enough»
-    command: sh -c 'sed -i -e "s/^user .*/user root;/" -e "s/worker_connections[[:space:]]*[0-9]*;/worker_connections 65535;/" /etc/nginx/nginx.conf; grep -q worker_rlimit_nofile /etc/nginx/nginx.conf || sed -i "/^worker_processes/a worker_rlimit_nofile 1048576;" /etc/nginx/nginx.conf; rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
-COMPOSE
+    { printf '\n'; nginx_service_yaml; } >> docker-compose.yml
+    # nginx, поднятый раньше через --site-only, теперь описан здесь — тот же
+    # проект и тот же сервис, compose просто заберёт контейнер себе
+    rm -f "$NGINX_COMPOSE"
     ok "docker-compose.yml записан (нода + nginx)"
   else
     ok "docker-compose.yml записан (только нода)"
@@ -4587,10 +4728,12 @@ COMPOSE
     fi
   fi
 fi
+fi   # SITE_ONLY
 
 # =============================================================================
-step "11/14  Проверка"
+nstep "Проверка"
 # =============================================================================
+if [ "$SITE_ONLY" != "1" ]; then
 sleep 6
 CT_STATUS="$(docker ps --filter name=remnanode --format '{{.Status}}' 2>/dev/null)"
 if [ -n "$CT_STATUS" ]; then ok "remnanode: $CT_STATUS"
@@ -4614,6 +4757,7 @@ if [ -n "$LOGERR" ]; then
   warn "в логах ноды есть ошибки:"
   printf '%s\n' "$LOGERR" | cut -c1-150 | sed 's/^/      /'
 fi
+fi   # SITE_ONLY: нода
 
 if [ "$DO_NGINX" = "1" ]; then
   NG_STATUS="$(docker ps --filter name=remnawave-nginx --format '{{.Status}}' 2>/dev/null)"
@@ -4630,7 +4774,7 @@ if [ "$DO_NGINX" = "1" ]; then
     # показываем хвост как есть, а не пустоту
     { printf '%s\n' "$NG_LOG" | grep -iE 'emerg|error' || printf '%s\n' "$NG_LOG"; } \
       | tail -3 | cut -c1-200 | sed 's/^/      /'
-    say "      перезапуск: cd $INSTALL_DIR && docker compose up -d"
+    say "      перезапуск: cd $INSTALL_DIR && docker compose ${NG_F:+-f $NG_F }up -d"
   elif docker exec remnawave-nginx nginx -t >/dev/null 2>&1; then
     ok "конфиг nginx валиден"
     # на повторном запуске контейнер не пересоздаётся, а конфиг мог поменяться
@@ -4723,11 +4867,28 @@ if [ "$DO_NGINX" = "1" ]; then
 
   # заглушку отдаёт не nginx напрямую, а Xray по правилам инбаунда из панели.
   # Сверяем их: чаще всего сайт «не появляется» именно из-за настроек панели
-  check_panel_inbound
+  if [ "$SITE_ONLY" != "1" ]; then
+    check_panel_inbound
+  elif ! docker inspect remnanode >/dev/null 2>&1; then
+    say "  ноды на сервере нет: снаружи заглушку покажет Xray, когда она появится —"
+    say "  в инбаунде Reality target = /dev/shm/nginx.sock, xver = 1"
+  else
+    # ноду ставили не мы — сокет nginx живёт в /dev/shm хоста, и без него
+    # в контейнере Reality не достучится до заглушки
+    if docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}{{.HostConfig.IpcMode}}' remnanode 2>/dev/null \
+         | grep -qE '(^| )/dev/shm( |$)|host$'; then
+      ok "нода видит /dev/shm — Xray достучится до /dev/shm/nginx.sock"
+    else
+      err "контейнер remnanode не видит /dev/shm хоста — Reality не достучится до заглушки"
+      say "      в docker-compose.yml ноды добавь в volumes: - /dev/shm:/dev/shm:rw и пересоздай её"
+    fi
+    check_panel_inbound
+  fi
 fi
 
+if [ "$SITE_ONLY" != "1" ]; then
 # =============================================================================
-step "12/14  TrafficGuard"
+nstep "TrafficGuard"
 # =============================================================================
 if [ "$DO_TG" != "1" ]; then
   warn "пропущено (--no-traffic-guard)"
@@ -4959,14 +5120,19 @@ UNIT
 fi
 
 # =============================================================================
-step "13/14  WARP"
+nstep "WARP"
 # =============================================================================
 install_warp
 
 # =============================================================================
-step "14/14  Отчёт при входе"
+nstep "Отчёт при входе"
 # =============================================================================
 install_motd
+else
+  # отчёт при входе — про ноду, а меню пригодится и так: добавить или убрать
+  # домен, пересобрать заглушку (begleq → 13, 14, 8)
+  install_cli
+fi   # SITE_ONLY
 
 # #############################################################################
 part "ИТОГ"
@@ -4981,6 +5147,7 @@ kv "Docker" "$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,)"
 kv "UFW" "$(ufw status 2>/dev/null | head -1 | sed 's/^Status: //')"
 kv "swap" "$(free -m | awk '/^Swap:/{print $2}') МБ"
 
+if [ "$SITE_ONLY" != "1" ]; then
 rule "нода"
 kv "каталог" "$INSTALL_DIR"
 kv "образ" "$NODE_IMAGE"
@@ -4996,6 +5163,7 @@ if ip link show warp >/dev/null 2>&1; then
 else
   kv "WARP" "не поднят"
 fi
+fi   # SITE_ONLY
 
 if [ "$DO_NGINX" = "1" ]; then
   rule "домены"
@@ -5025,7 +5193,12 @@ if [ -n "$FAILED" ]; then
   printf '  %s РЕЗУЛЬТАТ: настроено с ошибками %s\n\n' "$CB$BG_R" "$C0"
   exit 1
 fi
-say "  Дальше: в панели Remnawave привязать ноду к этому IP и порту $NODE_PORT,"
-say "  потом настроить inbound и хосты. Подготовка сервера закончена."
+if [ "$SITE_ONLY" = "1" ]; then
+  say "  Сертификат и сайт-заглушка готовы, нода не тронута. Дальше: в панели"
+  say "  в инбаунде Reality — serverNames с доменом и target = /dev/shm/nginx.sock, xver = 1."
+else
+  say "  Дальше: в панели Remnawave привязать ноду к этому IP и порту $NODE_PORT,"
+  say "  потом настроить inbound и хосты. Подготовка сервера закончена."
+fi
 say ""
 printf '  %s РЕЗУЛЬТАТ: ok %s\n\n' "$CB$BG_G" "$C0"
