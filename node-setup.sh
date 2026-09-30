@@ -897,6 +897,32 @@ tg_search() {
 
 # tg_check_ip IP — где адрес: белый список / бан (какой сетью и чьей) / свободен.
 # Если в бане — сразу предлагаем разбанить: только этот IP или всю сеть
+# IPv4/IPv6, можно с маской сети
+tg_valid() {
+  printf '%s' "$1" | grep -qE '^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F]*:[0-9a-fA-F:]+(/[0-9]{1,3})?)$'
+}
+
+# добавить адреса или сети (через запятую) в белый список с одной подписью
+tg_allow_add() {
+  local list="$1" a note added=""
+  for a in $(printf '%s' "$list" | tr ',;' '  '); do
+    tg_valid "$a" || { bad "не похоже на IP или сеть: «$a»"; continue; }
+    if grep -qxF "$a" "$TG_DIR/allow.list" 2>/dev/null; then ok "$a уже в белом списке"; continue; fi
+    added="$added $a"
+  done
+  [ -n "$added" ] || return 0
+  printf '%s?%s подпись (кто это; Enter — без подписи): ' "$CC" "$C0"
+  IFS= read -r note < "$TTY_IN" || true
+  for a in $added; do
+    tg-allow add "$a" ${note:+"$note"} >/dev/null 2>&1
+    if grep -qxF "$a" "$TG_DIR/allow.list" 2>/dev/null; then
+      ok "$a в белом списке — не блокируется, новые соединения проходят сразу"
+    else
+      bad "$a добавить не получилось: проверь tg-allow list"
+    fi
+  done
+}
+
 tg_check_ip() {
   local ip="$1" v4=1 m hits net pick target note
   case "$ip" in
@@ -907,8 +933,8 @@ tg_check_ip() {
     ok "$ip в белом списке — не блокируется"
     return 0
   fi
-  if [ "$v4" = 1 ]; then ipset test TG-BLOCK-V4 "$ip" 2>/dev/null || { ok "$ip не в бане — проходит обычные правила"; return 0; }
-  else ipset test TG-BLOCK-V6 "$ip" 2>/dev/null || { ok "$ip не в бане — проходит обычные правила"; return 0; }; fi
+  if [ "$v4" = 1 ]; then ipset test TG-BLOCK-V4 "$ip" 2>/dev/null || { ok "$ip не в бане — проходит обычные правила"; say "  ${CD}добавить в белый список заранее: пункт 3${C0}"; return 0; }
+  else ipset test TG-BLOCK-V6 "$ip" 2>/dev/null || { ok "$ip не в бане — проходит обычные правила"; say "  ${CD}добавить в белый список заранее: пункт 3${C0}"; return 0; }; fi
 
   bad "$ip БЛОКИРУЕТСЯ"
   net=""
@@ -962,7 +988,7 @@ menu_tg() {
     say ""
     say "  ${CC}${CB}1${C0}  проверить IP и разбанить"
     say "  ${CC}${CB}2${C0}  поиск по спискам: IP, сеть, AS, организация"
-    say "  ${CC}${CB}3${C0}  белый список: показать и убрать"
+    say "  ${CC}${CB}3${C0}  белый список: показать, добавить, убрать"
     say "  ${CC}${CB}4${C0}  обновить списки сейчас"
     printf '%s?%s выбор (Enter — назад): ' "$CC" "$C0"
     IFS= read -r c < "$TTY_IN" || return 0
@@ -989,20 +1015,30 @@ menu_tg() {
              say "  ${CD}разбанить: пункт 1 и нужный IP${C0}"
            fi
          fi ;;
-      3) entries="$(grep -vE '^[[:space:]]*(#|$)' "$TG_DIR/allow.list" 2>/dev/null)"
-         if [ -z "$entries" ]; then ok "белый список пуст"; continue; fi
-         i=0
-         while IFS= read -r e; do
-           i=$((i + 1))
-           q="$(grep -B1 -xF "$e" "$TG_DIR/allow.list" | head -1 | grep '^#' | sed 's/^#[[:space:]]*//')"
-           printf '  %s%2d%s  %s %s%s%s\n' "$CC$CB" "$i" "$C0" "$(pad "$e" 20)" "$CD" "$q" "$C0"
-         done <<< "$entries"
-         say ""
-         say "  ${CD}IP панели и адрес SSH добавлены при установке — без них можно отрезать себе доступ${C0}"
-         printf '%s?%s номер, чтобы убрать (Enter — ничего): ' "$CC" "$C0"
+      3) entries="$(tg_saved)"
+         if [ -z "$entries" ]; then
+           ok "белый список пуст"
+         else
+           f="$(head -1 "$INSTALL_DIR/panel_ip" 2>/dev/null | tr -d '[:space:]')"
+           i=0
+           while IFS='|' read -r e q; do
+             i=$((i + 1))
+             [ -n "$f" ] && [ "$e" = "$f" ] && q="${q:-панель}"
+             printf '  %s%2d%s  %s %s%s%s\n' "$CC$CB" "$i" "$C0" "$(pad "$e" 20)" "$CD" "$q" "$C0"
+           done <<< "$entries"
+           say ""
+           say "  ${CD}IP панели и адрес SSH добавлены при установке — без них можно отрезать себе доступ${C0}"
+         fi
+         say "  ${CD}добавить: IP или сеть (через запятую, можно CIDR); убрать: номер${C0}"
+         printf '%s?%s IP — добавить, номер — убрать (Enter — назад): ' "$CC" "$C0"
          IFS= read -r pick < "$TTY_IN" || true
+         pick="$(printf '%s' "$pick" | tr -d '[:space:]')"
          [ -n "$pick" ] || continue
-         e="$(printf '%s\n' "$entries" | sed -n "${pick}p" 2>/dev/null)"
+         case "$pick" in
+           *.*|*:*) tg_allow_add "$pick"; continue ;;
+           *[!0-9]*) warn "не понял «$pick»: нужен IP, сеть или номер"; continue ;;
+         esac
+         e="$(printf '%s\n' "$entries" | sed -n "${pick}p" 2>/dev/null | cut -d'|' -f1)"
          [ -n "$e" ] || { warn "нет такого номера"; continue; }
          confirm "Убрать $e из белого списка (снова попадёт под бан, если он в списках)?" n || continue
          tg-allow del "$e" >/dev/null && ok "$e убран" ;;
@@ -2021,7 +2057,7 @@ fi
 # списке он висел бы годами
 TG_OK=""
 for a in $(printf '%s' "$TG_ALLOW" | tr ',;' '  '); do
-  if printf '%s' "$a" | grep -qE '^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F]*:[0-9a-fA-F:]+(/[0-9]{1,3})?)$'; then
+  if tg_valid "$a"; then
     TG_OK="${TG_OK:+$TG_OK,}$a"
   else
     bad "не похоже на IP: «$a» — в белый список не добавляю"
@@ -2181,7 +2217,13 @@ case "${1:-list}" in
     ;;
   del)
     [ -n "${2:-}" ] || { echo "нужен адрес"; exit 1; }
-    grep -vxF "$2" "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    # вместе с адресом уходит и его подпись — комментарий прямо над ним,
+    # иначе она досталась бы следующему адресу. Шапку файла не трогаем
+    awk -v ip="$2" '
+      /^[[:space:]]*#/ { if (held != "") print held; held = $0; next }
+      $0 == ip { if (held ~ /(Исключения TrafficGuard|Сюда IP панели|Менять удобнее)/) print held; held = ""; next }
+      { if (held != "") print held; held = ""; print }
+      END { if (held != "") print held }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
     echo "убран $2"
     /usr/local/bin/tg-refresh --allow-only
     ;;
