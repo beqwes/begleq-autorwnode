@@ -423,6 +423,19 @@ open_web_ports() {
   say "  фаервол у хостера (панель провайдера) скрипт открыть не может — там 80 и 443 тоже должны быть открыты"
 }
 
+# куда пересылается входящий :443 (iptables/nft DNAT), пусто — никуда.
+# Такая пересылка срабатывает раньше nginx: снаружи до него на :443 не дойти
+nat443_target() {
+  { iptables -t nat -S 2>/dev/null | grep -E -- '--dport 443( |$)' | grep -oE -- '--to-destination [0-9.]+'
+    nft list ruleset 2>/dev/null | grep -E 'dport 443 .*dnat' | grep -oE 'dnat (ip )?to [0-9.]+'
+  } | awk '{print $NF}' | head -1
+}
+# есть ли исключение из этой пересылки для адреса $1 (правило RETURN на :443)
+nat443_excluded() {
+  iptables -t nat -S 2>/dev/null | grep -F -- "-s $1/32 " | grep -E -- '--dport 443( |$)' | grep -q -- '-j RETURN' && return 0
+  nft list ruleset 2>/dev/null | grep -F "ip saddr $1 " | grep -E 'dport 443( |$)' | grep -q 'return'
+}
+
 # адреса этого сервера: IPv4 на интерфейсах плюс внешний (api.ipify.org).
 # Сравнивать A-запись только с внешним нельзя: у сервера бывает несколько IP,
 # и наружу он ходит не с того, на который заходят (зашли на .99, а ipify
@@ -4923,14 +4936,29 @@ if [ "$DO_NGINX" = "1" ]; then
   elif [ "$NG_DIRECT" = "1" ]; then
     # nginx только что перечитал конфиг — даём ему открыть :443
     sleep 1
+    # проверка изнутри: запрос на 127.0.0.1 мимо пересылки, поэтому она
+    # говорит только, что nginx отвечает, а не что сайт виден снаружи
     for d in $NG_DOMAINS; do
       code="$(curl -sk --noproxy '*' --max-time 8 --resolve "$d:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$d/" 2>/dev/null)"
       if [ "$code" = "200" ]; then
-        ok "https://$d/ отвечает (200) — сайт открывается и без ноды"
+        ok "nginx отдаёт https://$d/ на :443 (200)"
       else
         err "https://$d/ не отвечает на :443 (код ${code:-нет}) — смотри: docker logs remnawave-nginx"
       fi
     done
+    # входящий :443 пересылают на другой сервер (там нода). Если её Reality берёт
+    # заглушку отсюда (target = домен:443), её же запросы уйдут обратно к ней —
+    # петля: браузер сайта не дождётся, а соединения множатся на обоих серверах
+    NAT443="$(nat443_target)"
+    if [ -n "$NAT443" ]; then
+      if nat443_excluded "$NAT443"; then
+        ok "входящий :443 пересылается на $NAT443, а запросы с $NAT443 доходят до nginx"
+      else
+        err "входящий :443 пересылается на $NAT443, и с $NAT443 тоже — петля, если там Reality с target = $DOMAIN:443"
+        say "      исключи $NAT443 из пересылки (и сохрани так же, как само правило пересылки):"
+        say "      iptables -t nat -I PREROUTING 1 -s $NAT443 -p tcp --dport 443 -j RETURN"
+      fi
+    fi
   elif ! docker inspect remnanode >/dev/null 2>&1; then
     say "  ноды на сервере нет: снаружи заглушку покажет Xray, когда она появится —"
     say "  в инбаунде Reality target = /dev/shm/nginx.sock, xver = 1"
@@ -5255,7 +5283,10 @@ if [ -n "$FAILED" ]; then
   printf '  %s РЕЗУЛЬТАТ: настроено с ошибками %s\n\n' "$CB$BG_R" "$C0"
   exit 1
 fi
-if [ "$SITE_ONLY" = "1" ] && [ "$NG_DIRECT" = "1" ]; then
+if [ "$SITE_ONLY" = "1" ] && [ "$NG_DIRECT" = "1" ] && [ -n "${NAT443:-}" ]; then
+  say "  Входящий :443 пересылается на $NAT443: сайт увидят через ноду там. В её инбаунде"
+  say "  Reality — serverNames: [\"$DOMAIN\"], target = $DOMAIN:443, xver = 0."
+elif [ "$SITE_ONLY" = "1" ] && [ "$NG_DIRECT" = "1" ]; then
   say "  Сайт открывается: https://$DOMAIN/ — пока ноды нет, :443 держит nginx."
   say "  Поставишь ноду — запусти begleq → 17 (или полную настройку): :443 уйдёт Xray,"
   say "  а в инбаунде Reality — serverNames с доменом и target = /dev/shm/nginx.sock, xver = 1."
