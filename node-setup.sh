@@ -508,6 +508,8 @@ menu_header() {
   printf '  %s%s%s\n' "$node" "$ngx" "$cc"
   printf '  %s%s%s\n' "$warp" "$tg" "$cdn"
 
+  menu_ports
+
   doms="$(conf_domains)"
   if [ -n "$doms" ]; then
     rule "домены"
@@ -523,6 +525,55 @@ menu_header() {
       fi
     done
   fi
+}
+
+# слушающие порты для шапки меню: кто держит и не наступил ли кто-то чужой на
+# порты ноды. Наружу — все TCP и UDP до 1024 (высокие UDP у Xray случайные,
+# их десятки), на 127.0.0.1 — только наши служебные. ss и docker — по разу
+menu_ports() {
+  local ids="" c id np need rows port proto pid name cell cells=() n=0 busy=""
+  command -v ss >/dev/null 2>&1 || return 0
+  for c in remnanode remnawave-nginx; do
+    id="$(docker inspect -f '{{.Id}}' "$c" 2>/dev/null)"; [ -n "$id" ] && ids="$ids $id"
+  done
+  np="$(grep -hE '^[[:space:]]*NODE_PORT=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"'\''[:space:]')"
+  need=" 443/tcp 443/udp 80/tcp ${np:-2222}/tcp ${FALLBACK_PORT:-9443}/tcp "
+
+  # порт proto pid, по одной строке на порт (v4 и v6 склеиваются)
+  rows="$( { ss -tlnpH 2>/dev/null | sed 's/^/tcp /'; ss -ulnpH 2>/dev/null | sed 's/^/udp /'; } | awk -v need="$need" '{
+      proto = $1; local = $5; port = local; sub(/.*:/, "", port); addr = local; sub(/:[^:]*$/, "", addr)
+      if (proto == "udp" && port + 0 > 1024) next
+      if (addr ~ /^(127\.|\[::1\]|\[::ffff:127\.)/ && index(need, " " port "/" proto " ") == 0) next
+      pid = ""; if (match($0, /pid=[0-9]+/)) pid = substr($0, RSTART + 4, RLENGTH - 4)
+      key = port "/" proto; if (key in seen) next; seen[key] = 1
+      print port, proto, pid
+    }' | sort -n -k1,1)"
+  [ -n "$rows" ] || return 0
+
+  while read -r port proto pid; do
+    name="$(cat "/proc/$pid/comm" 2>/dev/null)"; name="${name:-?}"; name="${name:0:11}"
+    c=""
+    for id in $ids; do grep -q "$id" "/proc/$pid/cgroup" 2>/dev/null && { c=1; break; }; done
+    if [ -n "$c" ]; then cell="$(dot ok) $(pad "$port/$proto" 9) $name"
+    else
+      case "$need" in
+        *" $port/$proto "*) cell="$(dot bad) $(pad "$port/$proto" 9) $CR$name$C0"; busy="$busy $port/$proto ($name)" ;;
+        *) cell="$(dot off) $(pad "$port/$proto" 9) $CD$name$C0" ;;
+      esac
+    fi
+    cells+=("$cell")
+  done <<< "$rows"
+
+  rule "порты"
+  for cell in "${cells[@]}"; do
+    n=$((n + 1))
+    if [ $((n % 3)) = 1 ]; then printf '  %s' "$(pad "$cell" 25)"
+    elif [ $((n % 3)) = 2 ]; then printf '%s' "$(pad "$cell" 25)"
+    else printf '%s\n' "$cell"; fi
+  done
+  [ $((n % 3)) = 0 ] || printf '\n'
+  [ -n "$busy" ] && bad "порты ноды заняты чужими программами:$busy"
+  return 0
 }
 
 # пункты меню по разделам, в две колонки. Номера прежние — их знают на память
