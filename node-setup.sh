@@ -2487,11 +2487,9 @@ if [ "$DO_NGINX" = "1" ]; then
     say "  A-запись должна уже указывать на этот сервер. Можно несколько"
     say "  доменов через запятую — каждый станет отдельным SNI со своим"
     say "  сертификатом и своим сайтом; первый — основной."
-    if [ "$SITE_ONLY" = "1" ]; then
-      [ -n "$OLD_DOMAINS" ] && say "  Enter — оставить как есть ($OLD_DOMAINS)."
-    elif [ -n "$OLD_DOMAINS" ]; then
-      say "  Enter — оставить как есть ($OLD_DOMAINS), «-» — без nginx и заглушки."
-    else
+    if [ -n "$OLD_DOMAINS" ]; then
+      say "  Enter — оставить как есть ($OLD_DOMAINS)."
+    elif [ "$SITE_ONLY" != "1" ]; then
       say "  Enter — пропустить, тогда поднимется только нода без nginx и заглушки."
     fi
   fi
