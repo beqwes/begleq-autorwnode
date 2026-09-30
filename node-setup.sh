@@ -174,9 +174,9 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --force-site         перезаписать уже существующие сайты-заглушки
   --no-nginx           не ставить nginx и не выпускать сертификат
   --no-site            не трогать сайт-заглушку
-  --site-only          только сертификат и сайт-заглушка с nginx: ноду, её ключ
-                       и порт, фаервол и систему не трогать (нужен --domain
-                       или ответ на вопрос о домене)
+  --site-only          только сертификат, сайт-заглушка с nginx и TrafficGuard:
+                       ноду, её ключ и порт, ufw и систему не трогать (нужен
+                       --domain или ответ на вопрос о домене)
   --tg-allow <ips>     исключения TrafficGuard: IP панели, других нод, свои
                        (через запятую; IP панели и текущий SSH добавятся сами)
   --no-traffic-guard   не ставить TrafficGuard
@@ -2358,7 +2358,7 @@ if [ "$SITE_ONLY" != "1" ] && interactive && ! docker inspect remnanode >/dev/nu
   say ""
   say "  Что настраиваем:"
   say "    ${CC}${CB}1${C0}  ноду целиком: система, фаервол, нода Remnawave, nginx, заглушка, сертификат"
-  say "    ${CC}${CB}2${C0}  только сайт-заглушку и сертификат — ноду, фаервол и систему не трогаю"
+  say "    ${CC}${CB}2${C0}  только сайт-заглушку, сертификат и TrafficGuard — ноду, ufw и систему не трогаю"
   SETUP_MODE=""
   while :; do
     ask SETUP_MODE "Вариант" "1"
@@ -2559,6 +2559,14 @@ while :; do
   PANEL_IP=""
 done
 
+fi   # SITE_ONLY: IP панели
+
+# TrafficGuard ставится в любом режиме. В --site-only IP панели не спрашиваем,
+# но сохранённый нужен белому списку: без него панель могла бы попасть в бан
+if [ "$SITE_ONLY" = "1" ] && [ -z "$PANEL_IP" ] && [ -s "$INSTALL_DIR/panel_ip" ]; then
+  PANEL_IP="$(head -1 "$INSTALL_DIR/panel_ip" | tr -d '[:space:]')"
+fi
+
 # --- белый список TrafficGuard: чтобы свои же ноды/релеи не улетели в блок.
 # Он живёт в allow.list и между запусками не теряется: показываем, что там
 # уже есть (Enter оставляет как было), а спрашиваем только новые адреса ---
@@ -2604,18 +2612,25 @@ for a in $(printf '%s' "$TG_ALLOW" | tr ',;' '  '); do
 done
 TG_ALLOW="$TG_OK"
 
+if [ "$SITE_ONLY" != "1" ]; then
 ask NEW_HOSTNAME "Новое имя сервера (Enter — оставить $(hostname))" ""
 ask TIMEZONE     "Часовой пояс" "Europe/Moscow"
-fi   # SITE_ONLY: панель, TrafficGuard, имя и часовой пояс
+fi   # SITE_ONLY: имя и часовой пояс
+
+# белый список для «Итого»: что уже есть и что добавится
+TG_SUM=""
+[ "$TG_SAVED_N" -gt 0 ] && TG_SUM="уже $TG_SAVED_N адр."
+[ -n "$TG_ALLOW" ] && TG_SUM="${TG_SUM:+$TG_SUM + }новые: $TG_ALLOW"
 
 say ""
 say "  ${CB}Итого:${C0}"
 if [ "$SITE_ONLY" = "1" ]; then
 say "     режим       только сайт-заглушка и сертификат"
-say "                 ${CD}нода, её ключ и порт, фаервол и система не трогаются${C0}"
+say "                 ${CD}нода, её ключ и порт, ufw и система не трогаются${C0}"
 say "     домены      $DOMAINS"
 say "     почта LE    $EMAIL"
 say "     каталог     $INSTALL_DIR"
+[ "$DO_TG" = "1" ] && say "     TrafficGuard белый список: ${TG_SUM:+$TG_SUM; }${PANEL_IP:+панель и }текущий SSH — сами"
 # заглушку снаружи показывает Xray ноды (Reality → сокет nginx). Ноды нет —
 # на :443 никто бы не ответил, поэтому до её появления :443 берёт nginx сам.
 # Чужой :443 не отнимаем: nginx на занятом порту не встал бы вовсе
@@ -2635,12 +2650,7 @@ else
 say "     каталог     $INSTALL_DIR"
 say "     порт ноды   $NODE_PORT  (панель: ${PANEL_IP:-любой IP})"
 say "     SSH-порт    $SSH_PORT (для правила ufw)"
-if [ "$DO_TG" = "1" ]; then
-  TG_SUM=""
-  [ "$TG_SAVED_N" -gt 0 ] && TG_SUM="уже $TG_SAVED_N адр."
-  [ -n "$TG_ALLOW" ] && TG_SUM="${TG_SUM:+$TG_SUM + }новые: $TG_ALLOW"
-  say "     TG-whitelist ${TG_SUM:+$TG_SUM; }панель и текущий SSH — сами"
-fi
+[ "$DO_TG" = "1" ] && say "     TG-whitelist ${TG_SUM:+$TG_SUM; }панель и текущий SSH — сами"
 say "     ключ        ${SECRET_KEY:0:10}… (${#SECRET_KEY} симв.)"
 say "     имя сервера ${NEW_HOSTNAME:-$(hostname) — без изменений}"
 say "     часовой пояс $TIMEZONE"
@@ -2677,7 +2687,7 @@ part "ЧАСТЬ 3: настройка"
 # #############################################################################
 # шаги нумеруются по ходу: в --site-only их меньше, чем в полной настройке
 S_NUM=0; S_ALL=14
-[ "$SITE_ONLY" = "1" ] && S_ALL=6
+[ "$SITE_ONLY" = "1" ] && S_ALL=7
 nstep() { S_NUM=$((S_NUM + 1)); step "$S_NUM/$S_ALL  $*"; }
 
 if [ "$SITE_ONLY" != "1" ]; then
@@ -5013,7 +5023,7 @@ if [ "$DO_NGINX" = "1" ]; then
   fi
 fi
 
-if [ "$SITE_ONLY" != "1" ]; then
+# TrafficGuard ставится в любом режиме, в том числе с одной заглушкой
 # =============================================================================
 nstep "TrafficGuard"
 # =============================================================================
@@ -5118,6 +5128,10 @@ iptables -A TRAFFIC-GUARD -m set --match-set TG-ALLOW-V4 src -j RETURN
 iptables -A TRAFFIC-GUARD -m set --match-set TG-BLOCK-V4 src -j DROP
 while iptables -D INPUT -j TRAFFIC-GUARD 2>/dev/null; do :; done
 iptables -I INPUT 1 -j TRAFFIC-GUARD
+# и в FORWARD: трафик, который сервер пересылает дальше (DNAT :443 на ноду
+# на другом сервере, контейнеры в сети docker), идёт мимо INPUT
+while iptables -D FORWARD -j TRAFFIC-GUARD 2>/dev/null; do :; done
+iptables -I FORWARD 1 -j TRAFFIC-GUARD
 
 if command -v ip6tables >/dev/null 2>&1; then
   ip6tables -N TRAFFIC-GUARD 2>/dev/null
@@ -5126,6 +5140,8 @@ if command -v ip6tables >/dev/null 2>&1; then
   ip6tables -A TRAFFIC-GUARD -m set --match-set TG-BLOCK-V6 src -j DROP
   while ip6tables -D INPUT -j TRAFFIC-GUARD 2>/dev/null; do :; done
   ip6tables -I INPUT 1 -j TRAFFIC-GUARD
+  while ip6tables -D FORWARD -j TRAFFIC-GUARD 2>/dev/null; do :; done
+  ip6tables -I FORWARD 1 -j TRAFFIC-GUARD
 fi
 
 ipset save > "$SAVE" 2>/dev/null
@@ -5246,6 +5262,7 @@ UNIT
   fi
 fi
 
+if [ "$SITE_ONLY" != "1" ]; then
 # =============================================================================
 nstep "WARP"
 # =============================================================================
