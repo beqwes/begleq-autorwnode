@@ -583,7 +583,7 @@ menu_items() {
      "" "ДОМЕНЫ (SNI)" "13|добавить домен" "14|убрать домен"
      "15|сменить версию ноды" "" "СКРИПТ" "10|обновить с гитхаба" "16|тесты VPS")
   R=("СЕТЬ" " 3|WARP: включить" " 4|WARP: выключить" " 5|WARP: снести" " 9|WARP: outbound для панели"
-     " 6|BBR и сетевые лимиты" " 7|TrafficGuard: исключения"
+     " 6|BBR и сетевые лимиты" " 7|TrafficGuard: бан и исключения"
      "" "YANDEX CDN" "11|настроить origin" "12|инструкция")
   cell() {
     case "$1" in
@@ -620,15 +620,7 @@ menu_main() {
           IFS= read -r yn < "$TTY_IN"
           case "$yn" in [yYдД]*) bash "$SELF" --warp-purge ;; *) warn "отменено" ;; esac ;;
       6)  bash "$SELF" --bbr-only ;;
-      7)  if command -v tg-allow >/dev/null 2>&1; then
-            tg-allow list
-            say ""
-            printf '%b' "${CC}?${C0} добавить IP в белый список (Enter — пропустить): "
-            IFS= read -r ip < "$TTY_IN"
-            [ -n "$ip" ] && tg-allow add "$ip"
-          else
-            warn "TrafficGuard не установлен — поставится при пункте 2"
-          fi ;;
+      7)  menu_tg ;;
       8)  D="$(conf_domains | tr ' ' ',')"
           if [ -z "$D" ]; then
             warn "домен не найден — сначала настрой ноду (пункт 2)"
@@ -820,6 +812,175 @@ change_node_version() {
     bad "контейнер remnanode не запущен — смотри: docker logs remnanode"
     return 1
   fi
+}
+
+# ---------- TrafficGuard: поиск в бане и разбан ----------
+TG_DIR=/etc/traffic-guard
+
+# первые N символов строки — не байтов: cut -c режет кириллицу и «·» пополам
+cut_chars() { local LC_ALL=C.UTF-8; printf '%s' "${1:0:$2}"; }
+
+# tg_find IPv4 → строки «файл|сеть|подпись» для всех сетей из блок-листов,
+# куда попадает адрес. Подпись — блок комментариев над сетью (AS, организация)
+tg_find() {
+  awk -v ip="$1" '
+    function num(a,  p) { split(a, p, "."); return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4] }
+    BEGIN { x = num(ip) }
+    FNR == 1 { note = "" }
+    /^[[:space:]]*$/ { note = ""; next }
+    /^[[:space:]]*#/ { sub(/^[[:space:]]*#[[:space:]]*/, ""); note = (note == "" ? $0 : note " · " $0); next }
+    {
+      net = $1; len = 32
+      if (index(net, "/")) { len = substr(net, index(net, "/") + 1) + 0; net = substr(net, 1, index(net, "/") - 1) }
+      if (net !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next
+      size = 2 ^ (32 - len)
+      if (int(num(net) / size) == int(x / size)) {
+        f = FILENAME; sub(/.*\//, "", f); print f "|" $1 "|" note
+      }
+    }' "$TG_DIR"/lists/*.list 2>/dev/null
+}
+
+# tg_search ТЕКСТ → блоки списков, где текст есть в подписи (AS, организация,
+# город) или в самой сети. Не больше 15 блоков, по 4 сети в блоке
+tg_search() {
+  awk -v q="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" '
+    # файл блока запоминаем сами: на первой строке следующего файла FILENAME
+    # уже другой, а flush() печатает блок из предыдущего
+    function flush() {
+      if (nets != "" && (index(tolower(note), q) || hit)) {
+        # нашли по самой сети — показываем совпавшие сети, а не первые в блоке
+        if (hit) { nets = mn; more = (mc > 4 ? mc - 4 : 0) }
+        if (++shown <= 15) { f = bfile; sub(/.*\//, "", f); print f "|" note "|" nets "|" more }
+      }
+      note = ""; nets = ""; n = 0; more = 0; hit = 0; mn = ""; mc = 0
+    }
+    FNR == 1 { flush() }
+    /^[[:space:]]*$/ { flush(); next }
+    /^[[:space:]]*#/ { if (nets != "") flush(); sub(/^[[:space:]]*#[[:space:]]*/, ""); note = (note == "" ? $0 : note " · " $0); next }
+    {
+      bfile = FILENAME
+      if (index($1, q)) { hit = 1; if (++mc <= 4) mn = (mn == "" ? $1 : mn " " $1) }
+      if (++n <= 4) nets = (nets == "" ? $1 : nets " " $1); else more++
+    }
+    END { flush(); if (shown > 15) print "…|ещё " shown - 15 " совпадений — уточни запрос||" }
+  ' "$TG_DIR"/lists/*.list 2>/dev/null
+}
+
+# tg_check_ip IP — где адрес: белый список / бан (какой сетью и чьей) / свободен.
+# Если в бане — сразу предлагаем разбанить: только этот IP или всю сеть
+tg_check_ip() {
+  local ip="$1" v4=1 m hits net pick target note
+  case "$ip" in
+    *:*) v4=0 ;;
+    *) printf '%s' "$ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || { bad "не похоже на IPv4/IPv6: $ip"; return 1; } ;;
+  esac
+  if { [ "$v4" = 1 ] && ipset test TG-ALLOW-V4 "$ip" 2>/dev/null; } || { [ "$v4" = 0 ] && ipset test TG-ALLOW-V6 "$ip" 2>/dev/null; }; then
+    ok "$ip в белом списке — не блокируется"
+    return 0
+  fi
+  if [ "$v4" = 1 ]; then ipset test TG-BLOCK-V4 "$ip" 2>/dev/null || { ok "$ip не в бане — проходит обычные правила"; return 0; }
+  else ipset test TG-BLOCK-V6 "$ip" 2>/dev/null || { ok "$ip не в бане — проходит обычные правила"; return 0; }; fi
+
+  bad "$ip БЛОКИРУЕТСЯ"
+  net=""
+  if [ "$v4" = 1 ]; then
+    hits="$(tg_find "$ip")"
+    while IFS='|' read -r m net note; do
+      [ -n "$m" ] || continue
+      say "    сеть $CB$net$C0  ${CD}из $m${C0}"
+      [ -n "$note" ] && say "    $CD$(cut_chars "$note" 70)$C0"
+    done <<< "$hits"
+    net="$(printf '%s\n' "$hits" | head -1 | cut -d'|' -f2)"
+  fi
+  say ""
+  say "  Разбан = добавить в белый список: он важнее блок-листа и не слетает"
+  say "  при ежедневном обновлении списков."
+  if [ -n "$net" ] && [ "$net" != "$ip" ] && [ "$net" != "$ip/32" ]; then
+    say "   1) только $ip"
+    say "   2) всю сеть $net"
+    printf '%s?%s разбанить [1/2, Enter — не трогать]: ' "$CC" "$C0"
+    IFS= read -r pick < "$TTY_IN" || true
+    case "$pick" in 1) target="$ip" ;; 2) target="$net" ;; *) warn "оставил в бане"; return 0 ;; esac
+  else
+    confirm "Разбанить $ip?" y || { warn "оставил в бане"; return 0; }
+    target="$ip"
+  fi
+  printf '%s?%s подпись для белого списка (кто это; Enter — без подписи): ' "$CC" "$C0"
+  IFS= read -r note < "$TTY_IN" || true
+  tg-allow add "$target" ${note:+"$note"} >/dev/null
+  if ipset test "TG-ALLOW-V$([ "$v4" = 1 ] && echo 4 || echo 6)" "$ip" 2>/dev/null; then
+    ok "$target разбанен — новые соединения проходят сразу"
+  else
+    bad "не получилось: проверь tg-allow list"
+  fi
+}
+
+menu_tg() {
+  local c q pick nb na ts entries e i f note nets more
+  if ! command -v tg-allow >/dev/null 2>&1 || ! ipset list TG-BLOCK-V4 >/dev/null 2>&1; then
+    warn "TrafficGuard не установлен — поставится при пункте 2"
+    return 0
+  fi
+  while :; do
+    nb="$(ipset list TG-BLOCK-V4 2>/dev/null | grep -cE '^[0-9]')"
+    na="$(ipset list TG-ALLOW-V4 2>/dev/null | grep -cE '^[0-9]')"
+    # shellcheck disable=SC2012  # имена файлов свои, без пробелов
+    ts="$(ls -t "$TG_DIR"/lists/*.list 2>/dev/null | head -1)"
+    rule "TrafficGuard"
+    say "  в бане ${CB}$nb${C0} сетей, в белом списке ${CB}$na${C0}, списки от $(date -r "$ts" '+%d.%m %H:%M' 2>/dev/null || echo ?)"
+    iptables -C INPUT -j TRAFFIC-GUARD 2>/dev/null || bad "цепочка TRAFFIC-GUARD не в INPUT — бан сейчас не работает (systemctl start tg-apply)"
+    say ""
+    say "  ${CC}${CB}1${C0}  проверить IP и разбанить"
+    say "  ${CC}${CB}2${C0}  поиск по спискам: IP, сеть, AS, организация"
+    say "  ${CC}${CB}3${C0}  белый список: показать и убрать"
+    say "  ${CC}${CB}4${C0}  обновить списки сейчас"
+    printf '%s?%s выбор (Enter — назад): ' "$CC" "$C0"
+    IFS= read -r c < "$TTY_IN" || return 0
+    say ""
+    case "$c" in
+      "") return 0 ;;
+      1) printf '%s?%s IP: ' "$CC" "$C0"; IFS= read -r q < "$TTY_IN" || true
+         q="$(printf '%s' "$q" | tr -d '[:space:]')"
+         [ -n "$q" ] && tg_check_ip "$q" ;;
+      2) printf '%s?%s что искать (IP, 95.161., AS8359, rostelecom…): ' "$CC" "$C0"; IFS= read -r q < "$TTY_IN" || true
+         q="$(printf '%s' "$q" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+         [ -n "$q" ] || continue
+         if printf '%s' "$q" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+           tg_check_ip "$q"
+         else
+           e="$(tg_search "$q")"
+           if [ -z "$e" ]; then ok "в списках ничего не нашлось по «$q»"
+           else
+             while IFS='|' read -r f note nets more; do
+               say "  $CB$(cut_chars "${note:-(без подписи)}" 72)$C0"
+               say "    $nets$([ "${more:-0}" != 0 ] && [ -n "$more" ] && echo " $CD+ещё $more$C0")  ${CD}$f${C0}"
+             done <<< "$e"
+             say ""
+             say "  ${CD}разбанить: пункт 1 и нужный IP${C0}"
+           fi
+         fi ;;
+      3) entries="$(grep -vE '^[[:space:]]*(#|$)' "$TG_DIR/allow.list" 2>/dev/null)"
+         if [ -z "$entries" ]; then ok "белый список пуст"; continue; fi
+         i=0
+         while IFS= read -r e; do
+           i=$((i + 1))
+           q="$(grep -B1 -xF "$e" "$TG_DIR/allow.list" | head -1 | grep '^#' | sed 's/^#[[:space:]]*//')"
+           printf '  %s%2d%s  %s %s%s%s\n' "$CC$CB" "$i" "$C0" "$(pad "$e" 20)" "$CD" "$q" "$C0"
+         done <<< "$entries"
+         say ""
+         say "  ${CD}IP панели и адрес SSH добавлены при установке — без них можно отрезать себе доступ${C0}"
+         printf '%s?%s номер, чтобы убрать (Enter — ничего): ' "$CC" "$C0"
+         IFS= read -r pick < "$TTY_IN" || true
+         [ -n "$pick" ] || continue
+         e="$(printf '%s\n' "$entries" | sed -n "${pick}p" 2>/dev/null)"
+         [ -n "$e" ] || { warn "нет такого номера"; continue; }
+         confirm "Убрать $e из белого списка (снова попадёт под бан, если он в списках)?" n || continue
+         tg-allow del "$e" >/dev/null && ok "$e убран" ;;
+      4) tg-refresh 2>&1 | sed 's/^/  /' ;;
+      *) warn "нет такого пункта" ;;
+    esac
+    say ""
+  done
 }
 
 # тесты VPS: чужие скрипты из шпаргалки. Каждый тянется из интернета и идёт
