@@ -73,6 +73,11 @@ SITE_ONLY=0
 # каталог тот же, значит и проект compose тот же — контейнер не задвоится
 COMPOSE_MARK="# generated-by: node-setup"
 NGINX_COMPOSE="docker-compose.nginx.yml"
+# NG_DIRECT=1 — ноды нет, и :443 держит сам nginx: иначе заглушку снаружи
+# никто бы не показал (её отдаёт Xray через сокет). В nginx.conf такой режим
+# помечен строкой NG_DIRECT_MARK — по ней видно, что порт надо отдать ноде
+NG_DIRECT=0
+NG_DIRECT_MARK="# direct-443"
 # Yandex CDN: nginx на :443, Xray XHTTP на loopback.
 CDN_ORIGIN="${CDN_ORIGIN:-}"; CDN_PUBLIC="${CDN_PUBLIC:-}"; CDN_PATH="${CDN_PATH:-}"
 CDN_XRAY_PORT="${CDN_XRAY_PORT:-}"; CDN_EDGE_HEADER="${CDN_EDGE_HEADER:-X-Cdn-Secret}"
@@ -351,6 +356,8 @@ check_ports() {
       ours)
         if [ "${rest%% *}" = "$want" ]; then
           printf '  %s %s %s %sуже наш (%s)%s\n' "$(dot ok)" "$(pad "$port/$proto" 10)" "$(pad "$desc" 34)" "$CD" "${rest#* }" "$C0"
+        elif [ "${rest%% *}" = remnawave-nginx ] && grep -qxF "$NG_DIRECT_MARK" "$INSTALL_DIR/nginx.conf" 2>/dev/null; then
+          printf '  %s %s %s %sнаш nginx (сайт без ноды) — отдаст порт%s\n' "$(dot ok)" "$(pad "$port/$proto" 10)" "$(pad "$desc" 34)" "$CD" "$C0"
         else
           printf '  %s %s %s %sзанят %s%s\n' "$(dot warn)" "$(pad "$port/$proto" 10)" "$(pad "$desc" 34)" "$CY" "${rest%% *}" "$C0"
           warn "$port/$proto держит наш ${rest%% *}, а нужен $want — проверь инбаунды в панели"
@@ -414,6 +421,19 @@ open_web_ports() {
     ok "ufw: 80/tcp и 443/tcp открыты"
   fi
   say "  фаервол у хостера (панель провайдера) скрипт открыть не может — там 80 и 443 тоже должны быть открыты"
+}
+
+# куда пересылается входящий :443 (iptables/nft DNAT), пусто — никуда.
+# Такая пересылка срабатывает раньше nginx: снаружи до него на :443 не дойти
+nat443_target() {
+  { iptables -t nat -S 2>/dev/null | grep -E -- '--dport 443( |$)' | grep -oE -- '--to-destination [0-9.]+'
+    nft list ruleset 2>/dev/null | grep -E 'dport 443 .*dnat' | grep -oE 'dnat (ip )?to [0-9.]+'
+  } | awk '{print $NF}' | head -1
+}
+# есть ли исключение из этой пересылки для адреса $1 (правило RETURN на :443)
+nat443_excluded() {
+  iptables -t nat -S 2>/dev/null | grep -F -- "-s $1/32 " | grep -E -- '--dport 443( |$)' | grep -q -- '-j RETURN' && return 0
+  nft list ruleset 2>/dev/null | grep -F "ip saddr $1 " | grep -E 'dport 443( |$)' | grep -q 'return'
 }
 
 # адреса этого сервера: IPv4 на интерфейсах плюс внешний (api.ipify.org).
@@ -2467,11 +2487,9 @@ if [ "$DO_NGINX" = "1" ]; then
     say "  A-запись должна уже указывать на этот сервер. Можно несколько"
     say "  доменов через запятую — каждый станет отдельным SNI со своим"
     say "  сертификатом и своим сайтом; первый — основной."
-    if [ "$SITE_ONLY" = "1" ]; then
-      [ -n "$OLD_DOMAINS" ] && say "  Enter — оставить как есть ($OLD_DOMAINS)."
-    elif [ -n "$OLD_DOMAINS" ]; then
-      say "  Enter — оставить как есть ($OLD_DOMAINS), «-» — без nginx и заглушки."
-    else
+    if [ -n "$OLD_DOMAINS" ]; then
+      say "  Enter — оставить как есть ($OLD_DOMAINS)."
+    elif [ "$SITE_ONLY" != "1" ]; then
       say "  Enter — пропустить, тогда поднимется только нода без nginx и заглушки."
     fi
   fi
@@ -2564,8 +2582,21 @@ say "                 ${CD}нода, её ключ и порт, фаервол �
 say "     домены      $DOMAINS"
 say "     почта LE    $EMAIL"
 say "     каталог     $INSTALL_DIR"
-# Xray на :443 не наш и не нужен: nginx слушает только сокет и :80
-check_ports "tcp:80:remnawave-nginx:nginx: редирект и сертификаты"
+# заглушку снаружи показывает Xray ноды (Reality → сокет nginx). Ноды нет —
+# на :443 никто бы не ответил, поэтому до её появления :443 берёт nginx сам.
+# Чужой :443 не отнимаем: nginx на занятом порту не встал бы вовсе
+if ! docker inspect remnanode >/dev/null 2>&1; then
+  case "$(port_who tcp 443)" in
+    free|"ours remnawave-nginx"*) NG_DIRECT=1 ;;
+    *) warn ":443 держит $(port_who tcp 443 | cut -d' ' -f2-) — не трогаю, сайт будет только на сокете /dev/shm/nginx.sock" ;;
+  esac
+fi
+if [ "$NG_DIRECT" = "1" ]; then
+  say "     :443        сайт отдаёт сам nginx, пока нет ноды (с нодой порт уйдёт Xray)"
+  check_ports "tcp:80:remnawave-nginx:nginx: редирект и сертификаты" "tcp:443:remnawave-nginx:nginx: сайт, пока нет ноды"
+else
+  check_ports "tcp:80:remnawave-nginx:nginx: редирект и сертификаты"
+fi
 else
 say "     каталог     $INSTALL_DIR"
 say "     порт ноды   $NODE_PORT  (панель: ${PANEL_IP:-любой IP})"
@@ -2845,9 +2876,12 @@ else
       NEED_CERT="$NEED_CERT $d"
     fi
   done
+  # в --site-only фаервол не настраивался (шаг пропущен), а без :80 не выпустить
+  # сертификат, без :443 — не открыть сайт, который nginx отдаёт сам
+  if [ "$SITE_ONLY" = "1" ] && [ "$DO_UFW" = "1" ] && { [ -n "$NEED_CERT" ] || [ "$NG_DIRECT" = "1" ]; }; then
+    open_web_ports
+  fi
   if [ -n "$NEED_CERT" ]; then
-    # в --site-only фаервол не настраивался (шаг пропущен), а без :80 не выпустить
-    [ "$SITE_ONLY" = "1" ] && [ "$DO_UFW" = "1" ] && open_web_ports
     command -v certbot >/dev/null 2>&1 || apt-get install -y -qq certbot >/dev/null 2>&1
     # на повторном запуске :80 уже держит наш nginx и отдаёт ACME-челлендж —
     # тогда standalone упал бы, выпускаем через webroot без остановки nginx
@@ -4523,6 +4557,24 @@ NGINX
     ok "на :80 повешен редирект в https и путь для продления сертификата"
   fi
 
+  # ноды нет: те же сайты напрямую на :443, без proxy_protocol — его шлёт
+  # только Xray. Отбойник по-прежнему не отдаёт сертификат на чужой SNI и IP
+  if [ "$NG_DIRECT" = "1" ] && [ -n "$NG_DOMAINS" ]; then
+    cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
+
+$NG_DIRECT_MARK
+# ноды нет — сайт отдаёт сам nginx. Появится нода — порт уйдёт Xray
+$(for d in $NG_DOMAINS; do ng_site_block "$d" "0.0.0.0:443 ssl" 0; done)
+server {
+    listen 0.0.0.0:443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+    return 444;
+}
+NGINX
+    ok "ноды нет — nginx сам отдаёт сайт на :443"
+  fi
+
   ok "nginx.conf записан (домены: ${NG_DOMAINS:-нет}; XHTTP $XHTTP_PATH → /dev/shm/xrxh.socket; WS $WS_PATH → $WS_SOCKET)"
   say "     инбаунды в панели для этой ноды (Xray подхватит сокеты из /dev/shm):"
   # shellcheck disable=SC2086  # список доменов нужно разбить на слова
@@ -4625,7 +4677,17 @@ site_only_nginx_up() {
 if [ "$DO_NGINX" != "1" ]; then
   warn "пропущено: домен не задан"
 else
+  NG_WAS_DIRECT=0
+  grep -qxF "$NG_DIRECT_MARK" "$INSTALL_DIR/nginx.conf" 2>/dev/null && NG_WAS_DIRECT=1
   write_nginx_conf
+  # nginx держал :443, пока ноды не было, — отпускаем сразу, а не на проверке:
+  # нода к тому времени уже может пытаться его занять
+  if [ "$NG_WAS_DIRECT" = "1" ] && [ "$NG_DIRECT" != "1" ] \
+     && docker exec remnawave-nginx nginx -t >/dev/null 2>&1 \
+     && docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1; then
+    ok "nginx отпустил :443 — теперь он за Xray ноды"
+    [ "$SITE_ONLY" = "1" ] && say "      если нода уже пыталась занять :443 и не смогла — перезапусти её: docker restart remnanode"
+  fi
   [ "$SITE_ONLY" = "1" ] && site_only_nginx_up
 fi
 
@@ -4869,6 +4931,32 @@ if [ "$DO_NGINX" = "1" ]; then
   # Сверяем их: чаще всего сайт «не появляется» именно из-за настроек панели
   if [ "$SITE_ONLY" != "1" ]; then
     check_panel_inbound
+  elif [ "$NG_DIRECT" = "1" ]; then
+    # nginx только что перечитал конфиг — даём ему открыть :443
+    sleep 1
+    # проверка изнутри: запрос на 127.0.0.1 мимо пересылки, поэтому она
+    # говорит только, что nginx отвечает, а не что сайт виден снаружи
+    for d in $NG_DOMAINS; do
+      code="$(curl -sk --noproxy '*' --max-time 8 --resolve "$d:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$d/" 2>/dev/null)"
+      if [ "$code" = "200" ]; then
+        ok "nginx отдаёт https://$d/ на :443 (200)"
+      else
+        err "https://$d/ не отвечает на :443 (код ${code:-нет}) — смотри: docker logs remnawave-nginx"
+      fi
+    done
+    # входящий :443 пересылают на другой сервер (там нода). Если её Reality берёт
+    # заглушку отсюда (target = домен:443), её же запросы уйдут обратно к ней —
+    # петля: браузер сайта не дождётся, а соединения множатся на обоих серверах
+    NAT443="$(nat443_target)"
+    if [ -n "$NAT443" ]; then
+      if nat443_excluded "$NAT443"; then
+        ok "входящий :443 пересылается на $NAT443, а запросы с $NAT443 доходят до nginx"
+      else
+        err "входящий :443 пересылается на $NAT443, и с $NAT443 тоже — петля, если там Reality с target = $DOMAIN:443"
+        say "      исключи $NAT443 из пересылки (и сохрани так же, как само правило пересылки):"
+        say "      iptables -t nat -I PREROUTING 1 -s $NAT443 -p tcp --dport 443 -j RETURN"
+      fi
+    fi
   elif ! docker inspect remnanode >/dev/null 2>&1; then
     say "  ноды на сервере нет: снаружи заглушку покажет Xray, когда она появится —"
     say "  в инбаунде Reality target = /dev/shm/nginx.sock, xver = 1"
@@ -5193,7 +5281,14 @@ if [ -n "$FAILED" ]; then
   printf '  %s РЕЗУЛЬТАТ: настроено с ошибками %s\n\n' "$CB$BG_R" "$C0"
   exit 1
 fi
-if [ "$SITE_ONLY" = "1" ]; then
+if [ "$SITE_ONLY" = "1" ] && [ "$NG_DIRECT" = "1" ] && [ -n "${NAT443:-}" ]; then
+  say "  Входящий :443 пересылается на $NAT443: сайт увидят через ноду там. В её инбаунде"
+  say "  Reality — serverNames: [\"$DOMAIN\"], target = $DOMAIN:443, xver = 0."
+elif [ "$SITE_ONLY" = "1" ] && [ "$NG_DIRECT" = "1" ]; then
+  say "  Сайт открывается: https://$DOMAIN/ — пока ноды нет, :443 держит nginx."
+  say "  Поставишь ноду — запусти begleq → 17 (или полную настройку): :443 уйдёт Xray,"
+  say "  а в инбаунде Reality — serverNames с доменом и target = /dev/shm/nginx.sock, xver = 1."
+elif [ "$SITE_ONLY" = "1" ]; then
   say "  Сертификат и сайт-заглушка готовы, нода не тронута. Дальше: в панели"
   say "  в инбаунде Reality — serverNames с доменом и target = /dev/shm/nginx.sock, xver = 1."
 else
