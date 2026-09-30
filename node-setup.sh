@@ -63,7 +63,7 @@ DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; D
 # TrafficGuard: списки сканеров и госсетей. Белый список важнее блок-листа —
 # иначе панель или соседняя нода попадут под раздачу
 TG_ALLOW="${TG_ALLOW:-}"; TG_FORCE=0; WARP_FORCE=0
-SET_NODE_VER=""; FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
+SET_NODE_VER=""; BUSY_OK=0; NODE_PORT_FORCED=0; FORCE_KEY=0; STATUS_ONLY=0; NO_STATUS=0; ASSUME_YES=0; FORCE_SITE=0; MOTD_ONLY=0; WARP_ONLY=0; WARP_OFF=0; WARP_PURGE=0; BBR_ONLY=0; MENU=0
 # Yandex CDN: nginx на :443, Xray XHTTP на loopback.
 CDN_ORIGIN="${CDN_ORIGIN:-}"; CDN_PUBLIC="${CDN_PUBLIC:-}"; CDN_PATH="${CDN_PATH:-}"
 CDN_XRAY_PORT="${CDN_XRAY_PORT:-}"; CDN_EDGE_HEADER="${CDN_EDGE_HEADER:-X-Cdn-Secret}"
@@ -194,6 +194,8 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --no-fail2ban        не ставить fail2ban
   --no-swap            не создавать swap
   --force-key          перезаписать существующий SECRET_KEY
+  --ignore-busy-ports  продолжать, даже если нужные порты заняты чужими
+                       программами (без флага с --yes скрипт остановится)
   --yes                ничего не спрашивать, брать дефолты
   -h, --help           эта справка
 USAGE
@@ -250,6 +252,7 @@ while [ $# -gt 0 ]; do
     --no-swap)     DO_SWAP=0; shift;;
     --force-key)   FORCE_KEY=1; shift;;
     --yes|-y)      ASSUME_YES=1; shift;;
+    --ignore-busy-ports) BUSY_OK=1; shift;;
     -h|--help)     usage; exit 0;;
     *) die "неизвестный аргумент: $1 (--help)";;
   esac
@@ -289,6 +292,78 @@ confirm() {   # confirm "вопрос" y|n
   IFS= read -r a < "$TTY_IN" || true
   a="${a:-$def}"
   case "$a" in [yYдД]*) return 0;; *) return 1;; esac
+}
+
+# ---------- кто занимает порты ----------
+# Процессы наших контейнеров узнаём по cgroup, а не по имени: «nginx» может
+# оказаться и системным nginx, который мы бы молча сломали
+our_container_of_pid() {   # PID → remnanode | remnawave-nginx | пусто
+  local c id
+  for c in remnanode remnawave-nginx; do
+    id="$(docker inspect -f '{{.Id}}' "$c" 2>/dev/null)"
+    [ -n "$id" ] && grep -q "$id" "/proc/$1/cgroup" 2>/dev/null && { echo "$c"; return 0; }
+  done
+  return 0
+}
+
+# port_who tcp|udp ПОРТ → «free», «ours КОНТЕЙНЕР ПРОЦЕСС» или «foreign ПРОЦЕСС(pid N)»
+port_who() {
+  local lines pid name cont foreign="" ours=""
+  if [ "$1" = udp ]; then lines="$(ss -ulnpH 2>/dev/null)"; else lines="$(ss -tlnpH 2>/dev/null)"; fi
+  lines="$(printf '%s\n' "$lines" | awk -v p=":$2" '$4 ~ p"$"')"
+  [ -n "$lines" ] || { echo free; return 0; }
+  for pid in $(printf '%s\n' "$lines" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+    name="$(cat "/proc/$pid/comm" 2>/dev/null)"
+    cont="$(our_container_of_pid "$pid")"
+    if [ -n "$cont" ]; then ours="$cont ${name:-?}"; else foreign="${name:-?}(pid $pid)"; fi
+  done
+  if [ -n "$foreign" ]; then echo "foreign $foreign"
+  elif [ -n "$ours" ]; then echo "ours $ours"
+  else echo "foreign (процесс не виден)"; fi
+}
+
+# check_ports "proto:порт:контейнер:описание" … — таблица «что займём и кто там
+# сейчас». Контейнер — чей порт должен быть (remnanode / remnawave-nginx).
+# Занято чужим: в терминале спрашиваем (по умолчанию «нет»), с --yes — стоп,
+# если не дали --ignore-busy-ports. Настройка не должна тихо ломать чужое
+check_ports() {
+  local e proto port want desc who kind rest n_foreign=0 busy=""
+  command -v ss >/dev/null 2>&1 || { warn "ss нет — занятость портов не проверить"; return 0; }
+  rule "порты"
+  for e in "$@"; do
+    proto="${e%%:*}"; e="${e#*:}"; port="${e%%:*}"; e="${e#*:}"; want="${e%%:*}"; desc="${e#*:}"
+    who="$(port_who "$proto" "$port")"; kind="${who%% *}"; rest="${who#* }"
+    case "$kind" in
+      free)
+        printf '  %s %s %s %sсвободен%s\n' "$(dot ok)" "$(pad "$port/$proto" 10)" "$(pad "$desc" 34)" "$CD" "$C0" ;;
+      ours)
+        if [ "${rest%% *}" = "$want" ]; then
+          printf '  %s %s %s %sуже наш (%s)%s\n' "$(dot ok)" "$(pad "$port/$proto" 10)" "$(pad "$desc" 34)" "$CD" "${rest#* }" "$C0"
+        else
+          printf '  %s %s %s %sзанят %s%s\n' "$(dot warn)" "$(pad "$port/$proto" 10)" "$(pad "$desc" 34)" "$CY" "${rest%% *}" "$C0"
+          warn "$port/$proto держит наш ${rest%% *}, а нужен $want — проверь инбаунды в панели"
+        fi ;;
+      *)
+        printf '  %s %s %s %sЧУЖОЙ: %s%s\n' "$(dot bad)" "$(pad "$port/$proto" 10)" "$(pad "$desc" 34)" "$CR" "$rest" "$C0"
+        n_foreign=$((n_foreign + 1)); busy="$busy $port/$proto" ;;
+    esac
+  done
+  [ "$n_foreign" = 0 ] && return 0
+
+  say ""
+  bad "заняты чужими программами:$busy"
+  say "    настройка займёт эти порты: либо чужой сервис перестанет работать,"
+  # shellcheck disable=SC2086  # список портов разбиваем на строки
+  say "    либо наш не поднимется. Кто это: ss -tulnp | grep -E ':($(printf '%s\n' $busy | cut -d/ -f1 | sort -u | paste -sd'|'))\b'"
+  if [ "$BUSY_OK" = 1 ]; then
+    warn "--ignore-busy-ports: продолжаю, как просили"
+    return 0
+  fi
+  if interactive; then
+    confirm "Всё равно продолжить?" n && return 0
+    die "отменено — освободи порты или поменяй их и запусти снова"
+  fi
+  die "порты заняты чужими программами — ничего не менял. Освободи их или добавь --ignore-busy-ports"
 }
 
 # «A.com, b.com;c.com» → «a.com b.com c.com»: нижний регистр, без повторов
@@ -1069,6 +1144,10 @@ install_yandex_cdn() {
   else
     ok "DNS: $CDN_ORIGIN → ${RESOLVED:-$MY_IP}"
   fi
+
+  check_ports "tcp:443:remnawave-nginx:nginx: origin для CDN" \
+              "tcp:80:remnawave-nginx:nginx: сертификаты" \
+              "tcp:${CDN_XRAY_PORT:-11443}:remnanode:Xray XHTTP (127.0.0.1)"
 
   if ! confirm "Писать nginx под Yandex CDN?" y; then
     die "отменено"
@@ -2040,7 +2119,7 @@ while :; do
     BUSY="$(ss -tlnpH 2>/dev/null | awk -v p=":$NODE_PORT" '$4 ~ p"$" {print $0}' | grep -v 'rw-node\|remnanode' | head -1)"
     if [ -n "$BUSY" ]; then
       warn "порт $NODE_PORT уже слушает: $(printf '%s' "$BUSY" | grep -oE 'users:\(\("[^"]+' | sed 's/.*"//')"
-      confirm "Всё равно занять его под ноду?" n && break
+      confirm "Всё равно занять его под ноду?" n && { NODE_PORT_FORCED=1; break; }
     else
       break
     fi
@@ -2165,6 +2244,17 @@ say "     ключ        ${SECRET_KEY:0:10}… (${#SECRET_KEY} симв.)"
 say "     имя сервера ${NEW_HOSTNAME:-$(hostname) — без изменений}"
 say "     часовой пояс $TIMEZONE"
 say "     обновление пакетов: $([ "$DO_UPGRADE" = 1 ] && echo да || echo нет)   ufw: $([ "$DO_UFW" = 1 ] && echo да || echo нет)   fail2ban: $([ "$DO_F2B" = 1 ] && echo да || echo нет)   swap: $([ "$DO_SWAP" = 1 ] && echo да || echo нет)"
+# порты, которые настройка займёт, и кто на них сейчас
+PORTS_PLAN=("tcp:443:remnanode:Xray: Reality / XHTTP / WS" "tcp:$NODE_PORT:remnanode:API ноды (связь с панелью)")
+[ "$NODE_PORT_FORCED" = 1 ] && PORTS_PLAN=("tcp:443:remnanode:Xray: Reality / XHTTP / WS")
+PORTS_PLAN+=("udp:443:remnanode:Hysteria2 / QUIC")
+case "${HYSTERIA_PORT:-0}" in 0|*:*) : ;; *) PORTS_PLAN+=("udp:$HYSTERIA_PORT:remnanode:Hysteria2") ;; esac
+if [ "$DO_NGINX" = "1" ]; then
+  PORTS_PLAN+=("tcp:80:remnawave-nginx:nginx: редирект и сертификаты")
+  [ "${FALLBACK_PORT:-0}" != "0" ] && PORTS_PLAN+=("tcp:$FALLBACK_PORT:remnawave-nginx:nginx: dest для Reality (127.0.0.1)")
+fi
+check_ports "${PORTS_PLAN[@]}"
+
 if ! confirm "Начинать настройку?" y; then
   if interactive; then die "отменено"; fi
   die "нет терминала для подтверждения — запусти из консоли сервера либо добавь --yes"
