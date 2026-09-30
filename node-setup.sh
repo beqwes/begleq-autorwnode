@@ -2098,6 +2098,10 @@ if [ "$DO_NGINX" = "1" ]; then
       say "  Enter — пропустить, тогда поднимется только нода без nginx и заглушки."
     fi
   fi
+  # из флага --domain список уже разобран: DOMAIN — только основной, остальные
+  # в DOMAINS. Возвращаем в DOMAIN весь список, иначе ниже, при повторном
+  # разборе, дополнительные домены потерялись бы (так терялись в begleq → 13)
+  [ -n "$DOMAINS" ] && DOMAIN="$(printf '%s' "$DOMAINS" | tr ' ' ',')"
   ask DOMAIN "Домены ноды (self-steal), через запятую" "$OLD_DOMAINS"
   [ "$DOMAIN" = "-" ] && DOMAIN=""
   DOMAINS="$(norm_domains "$DOMAIN")"
