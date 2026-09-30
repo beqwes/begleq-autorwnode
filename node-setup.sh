@@ -54,9 +54,9 @@ WS_SOCKET="${WS_SOCKET:-/dev/shm/xrws.socket}"
 # port-hopping задай --hysteria-port (например 8443 или 20000:50000). Cert Xray
 # берёт из /etc/letsencrypt (том примонтирован в контейнер ноды)
 HYSTERIA_PORT="${HYSTERIA_PORT:-0}"
-# Reality-инбаунд отдаёт «украденный» сайт по адресу из dest. Панели пишут туда
-# либо unix-сокет, либо 127.0.0.1:9443 — поэтому слушаем оба варианта сразу
-FALLBACK_PORT="${FALLBACK_PORT:-9443}"
+# Reality отдаёт «украденный» сайт по адресу из target: наш nginx слушает
+# unix-сокет /dev/shm/nginx.sock (в инбаунде — target: /dev/shm/nginx.sock,
+# xver: 1). Отдельный TCP-порт под это не держим
 WEBROOT="${WEBROOT:-/var/www/html}"
 SITES_ROOT="${SITES_ROOT:-/var/www/sites}"
 DO_UPGRADE=1; DO_UFW=1; DO_F2B=1; DO_SWAP=1; DO_NGINX=1; DO_SITE=1; DO_MOTD=1; DO_TG=1; DO_WARP=1; DO_BBR=1
@@ -154,7 +154,6 @@ node-setup.sh — отчёт о ноде и её первоначальная н
   --ws-path <path>     путь nginx→Xray для VLESS+WS+TLS (по умолчанию /api/v2/gateway)
   --hysteria-port <p>  доп. UDP-порт/диапазон под Hysteria2 (443/udp открыт всегда;
                        пример: 8443 или 20000:50000 для port-hopping)
-  --fallback-port <p>  локальный порт для dest у Reality (по умолчанию 9443, 0 — выключить)
   --site-theme <t>     стиль заглушки основного домена: nexora, kanso, dustline…
                        (весь список — в меню begleq; по умолчанию случайный;
                        остальным доменам стили подбираются сами, без повторов)
@@ -214,7 +213,7 @@ while [ $# -gt 0 ]; do
     --xhttp-path)  XHTTP_PATH="${2:-}"; shift 2;;
     --ws-path)     WS_PATH="${2:-}"; shift 2;;
     --hysteria-port) HYSTERIA_PORT="${2:-0}"; shift 2;;
-    --fallback-port) FALLBACK_PORT="${2:-9443}"; shift 2;;
+    --fallback-port) warn "--fallback-port больше не нужен: заглушка только на /dev/shm/nginx.sock"; shift 2;;
     --site-theme)  SITE_THEME="${2:-}"; shift 2;;
     --force-site)  FORCE_SITE=1; shift;;
     --no-nginx)    DO_NGINX=0; shift;;
@@ -445,17 +444,9 @@ check_panel_inbound() {
   case " $dests " in
     *"/dev/shm/nginx.sock"*) dest_ok=1; ok "dest указывает на наш сокет /dev/shm/nginx.sock" ;;
   esac
-  if [ "$dest_ok" = 0 ] && [ "${FALLBACK_PORT:-0}" != "0" ]; then
-    case " $dests " in
-      *"127.0.0.1:$FALLBACK_PORT"*|*"localhost:$FALLBACK_PORT"*)
-        dest_ok=1; ok "dest указывает на 127.0.0.1:$FALLBACK_PORT — этот порт мы слушаем" ;;
-    esac
-  fi
   if [ "$dest_ok" = 0 ]; then
-    err "dest инбаунда ведёт не к заглушке (${dests:-пусто})"
-    say "      варианты: поставить в панели dest = /dev/shm/nginx.sock с proxyProtocol,"
-    say "      либо dest = 127.0.0.1:$FALLBACK_PORT, либо перезапустить скрипт с"
-    say "      --fallback-port <порт из dest>"
+    err "target инбаунда ведёт не к заглушке (${dests:-пусто})"
+    say "      в панели: target = /dev/shm/nginx.sock, xver = 1"
   fi
 }
 
@@ -537,7 +528,7 @@ menu_ports() {
     id="$(docker inspect -f '{{.Id}}' "$c" 2>/dev/null)"; [ -n "$id" ] && ids="$ids $id"
   done
   np="$(grep -hE '^[[:space:]]*NODE_PORT=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"'\''[:space:]')"
-  need=" 443/tcp 443/udp 80/tcp ${np:-2222}/tcp ${FALLBACK_PORT:-9443}/tcp "
+  need=" 443/tcp 443/udp 80/tcp ${np:-2222}/tcp "
 
   # порт proto pid, по одной строке на порт (v4 и v6 склеиваются)
   rows="$( { ss -tlnpH 2>/dev/null | sed 's/^/tcp /'; ss -ulnpH 2>/dev/null | sed 's/^/udp /'; } | awk -v need="$need" '{
@@ -2517,7 +2508,6 @@ PORTS_PLAN+=("udp:443:remnanode:Hysteria2 / QUIC")
 case "${HYSTERIA_PORT:-0}" in 0|*:*) : ;; *) PORTS_PLAN+=("udp:$HYSTERIA_PORT:remnanode:Hysteria2") ;; esac
 if [ "$DO_NGINX" = "1" ]; then
   PORTS_PLAN+=("tcp:80:remnawave-nginx:nginx: редирект и сертификаты")
-  [ "${FALLBACK_PORT:-0}" != "0" ] && PORTS_PLAN+=("tcp:$FALLBACK_PORT:remnawave-nginx:nginx: dest для Reality (127.0.0.1)")
 fi
 check_ports "${PORTS_PLAN[@]}"
 
@@ -4414,26 +4404,11 @@ NGINX
     ok "на :80 повешен редирект в https и путь для продления сертификата"
   fi
 
-  # второй вход для панелей, где у Reality dest = 127.0.0.1:<порт>, а не сокет.
-  # Наружу порт не открывается — только петля, снаружи его не видно
-  if [ "${FALLBACK_PORT:-0}" != "0" ]; then
-    cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
-
-$(for d in $NG_DOMAINS; do ng_site_block "$d" "127.0.0.1:$FALLBACK_PORT ssl" 0; done)
-server {
-    listen 127.0.0.1:$FALLBACK_PORT ssl default_server;
-    server_name _;
-    ssl_reject_handshake on;
-    return 444;
-}
-NGINX
-    ok "заглушка также слушает 127.0.0.1:$FALLBACK_PORT (для dest вида 127.0.0.1:$FALLBACK_PORT)"
-  fi
   ok "nginx.conf записан (домены: ${NG_DOMAINS:-нет}; XHTTP $XHTTP_PATH → /dev/shm/xrxh.socket; WS $WS_PATH → $WS_SOCKET)"
   say "     инбаунды в панели для этой ноды (Xray подхватит сокеты из /dev/shm):"
   # shellcheck disable=SC2086  # список доменов нужно разбить на слова
   SN_JSON="$(printf '"%s", ' $NG_DOMAINS | sed 's/, $//')"
-  say "       • VLESS Reality — serverNames: [$SN_JSON]; dest=/dev/shm/nginx.sock (proxyProtocol) или 127.0.0.1:$FALLBACK_PORT"
+  say "       • VLESS Reality — serverNames: [$SN_JSON]; target=/dev/shm/nginx.sock, xver=1"
   [ "$NG_DOMAINS" != "$DOMAIN" ] && say "                         в хостах панели — по хосту на домен, sni = нужный домен"
   say "       • VLESS XHTTP   — path=$XHTTP_PATH; listen unix:/dev/shm/xrxh.socket"
   say "       • VLESS WS+TLS  — network=ws, path=$WS_PATH; listen unix:$WS_SOCKET (nginx терминирует TLS)"
