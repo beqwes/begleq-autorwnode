@@ -2475,7 +2475,27 @@ if [ "$DO_NGINX" = "1" ]; then
   fi
 fi
 
-ask PANEL_IP     "IP панели Remnawave (Enter — порт откроется всем)" ""
+# --- IP панели: как SECRET_KEY — сохранённый предлагаем оставить ---
+# хранится в $INSTALL_DIR/panel_ip; на нодах, поставленных до этого файла,
+# берём из правила ufw «remnawave panel»
+EXIST_PANEL=""
+[ -s "$INSTALL_DIR/panel_ip" ] && EXIST_PANEL="$(head -1 "$INSTALL_DIR/panel_ip" | tr -d '[:space:]')"
+if [ -z "$EXIST_PANEL" ] && command -v ufw >/dev/null 2>&1; then
+  EXIST_PANEL="$(ufw status 2>/dev/null | awk '/# remnawave panel$/ && $3 != "Anywhere" && $3 !~ /\(v6\)/ {print $3; exit}')"
+fi
+if [ -z "$PANEL_IP" ] && [ -n "$EXIST_PANEL" ]; then
+  ok "на ноде уже есть IP панели: $EXIST_PANEL"
+  if confirm "Оставить его?" y; then PANEL_IP="$EXIST_PANEL"; fi
+fi
+while :; do
+  ask PANEL_IP "IP панели Remnawave (Enter — порт откроется всем)" ""
+  PANEL_IP="$(printf '%s' "$PANEL_IP" | tr -d '[:space:]')"
+  [ -z "$PANEL_IP" ] && break
+  printf '%s' "$PANEL_IP" | grep -qE '^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F]*:[0-9a-fA-F:]+(/[0-9]{1,3})?)$' && break
+  bad "не похоже на IP: «$PANEL_IP»"
+  interactive || die "IP панели «$PANEL_IP» не подходит"
+  PANEL_IP=""
+done
 
 # --- белый список TrafficGuard: чтобы свои же ноды/релеи не улетели в блок ---
 if [ "$DO_TG" = "1" ] && [ -z "$TG_ALLOW" ]; then
@@ -2514,6 +2534,14 @@ check_ports "${PORTS_PLAN[@]}"
 if ! confirm "Начинать настройку?" y; then
   if interactive; then die "отменено"; fi
   die "нет терминала для подтверждения — запусти из консоли сервера либо добавь --yes"
+fi
+
+# IP панели запоминаем сразу: в следующий раз его не придётся вводить
+mkdir -p "$INSTALL_DIR"
+if [ -n "$PANEL_IP" ]; then
+  printf '%s\n' "$PANEL_IP" > "$INSTALL_DIR/panel_ip"
+else
+  rm -f "$INSTALL_DIR/panel_ip"
 fi
 
 # #############################################################################
@@ -2670,6 +2698,20 @@ else
     ok "старое правило на порт $OLD_PORT удалено"
   fi
   if [ -n "$PANEL_IP" ]; then
+    # раньше порт мог быть открыт всем (IP не задавали) или старой панели —
+    # без удаления этих правил «только для панели» ничего бы не закрыло
+    # ufw отвечает успехом и на удаление несуществующего правила, поэтому
+    # сначала смотрим, есть ли оно, — иначе сообщение врало бы каждый запуск
+    UFW_NOW="$(ufw status 2>/dev/null)"
+    if printf '%s\n' "$UFW_NOW" | grep -qE "^${NODE_PORT}/tcp[[:space:]]+ALLOW[[:space:]]+Anywhere"; then
+      ufw --force delete allow "${NODE_PORT}/tcp" >/dev/null 2>&1
+      ok "правило «порт $NODE_PORT открыт всем» убрано"
+    fi
+    if [ -n "$EXIST_PANEL" ] && [ "$EXIST_PANEL" != "$PANEL_IP" ] \
+       && printf '%s\n' "$UFW_NOW" | grep -qE "^${NODE_PORT}/tcp[[:space:]]+ALLOW[[:space:]]+${EXIST_PANEL//./\\.}([[:space:]]|\$)"; then
+      ufw --force delete allow from "$EXIST_PANEL" to any port "$NODE_PORT" >/dev/null 2>&1
+      ok "правило для прежней панели $EXIST_PANEL убрано"
+    fi
     ufw allow from "$PANEL_IP" to any port "$NODE_PORT" comment 'remnawave panel' >/dev/null 2>&1
     ok "порт ноды $NODE_PORT открыт только для $PANEL_IP"
   else
