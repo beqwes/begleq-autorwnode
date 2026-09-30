@@ -4173,8 +4173,11 @@ COMPOSE
       - /var/www/certbot:/var/www/certbot:ro
       - /dev/shm:/dev/shm:rw
     # воркеры под root: иначе они (юзер nginx) не могут писать в unix-сокеты
-    # Xray (xrxh/xrws, права 755) и XHTTP/WS-локейшны отдают 502
-    command: sh -c 'sed -i "s/^user .*/user root;/" /etc/nginx/nginx.conf; rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
+    # Xray (xrxh/xrws, права 755) и XHTTP/WS-локейшны отдают 502.
+    # В штатном nginx.conf образа worker_connections 1024, а через nginx идёт
+    # весь XHTTP/WS и каждый клиент занимает два соединения (к нему и к Xray) —
+    # под нагрузкой лимит кончается: «1024 worker_connections are not enough»
+    command: sh -c 'sed -i -e "s/^user .*/user root;/" -e "s/worker_connections[[:space:]]*[0-9]*;/worker_connections 65535;/" /etc/nginx/nginx.conf; grep -q worker_rlimit_nofile /etc/nginx/nginx.conf || sed -i "/^worker_processes/a worker_rlimit_nofile 1048576;" /etc/nginx/nginx.conf; rm -f /dev/shm/nginx.sock && exec nginx -g "daemon off;"'
 COMPOSE
     ok "docker-compose.yml записан (нода + nginx)"
   else
