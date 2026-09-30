@@ -2559,16 +2559,50 @@ while :; do
   PANEL_IP=""
 done
 
-# --- белый список TrafficGuard: чтобы свои же ноды/релеи не улетели в блок ---
+# --- белый список TrafficGuard: чтобы свои же ноды/релеи не улетели в блок.
+# Он живёт в allow.list и между запусками не теряется: показываем, что там
+# уже есть (Enter оставляет как было), а спрашиваем только новые адреса ---
+# «адрес|подпись» по строке: подпись — комментарий над адресом (tg-allow add),
+# шапку файла за подпись не принимаем
+tg_saved() {
+  awk '/^[[:space:]]*#/ { c = $0; sub(/^[[:space:]]*#[[:space:]]*/, "", c)
+                          if (c ~ /^(Исключения TrafficGuard|Сюда IP панели|Менять удобнее)/) c = ""; next }
+       /^[[:space:]]*$/ { c = ""; next }
+       { if (!seen[$1]++) print $1 "|" c; c = "" }' "$TG_DIR/allow.list" 2>/dev/null
+}
+TG_SAVED="$(tg_saved)"
+TG_SAVED_N="$(printf '%s' "$TG_SAVED" | grep -c .)"
 if [ "$DO_TG" = "1" ] && [ -z "$TG_ALLOW" ]; then
   say ""
   say "  Белый список TrafficGuard — адреса, которые никогда не блокируются."
   say "  Сюда: IP других нод и релеев, свои админские IP. Иначе своя же нода,"
   say "  попав в гос-/сканер-листы, окажется заблокирована (банки «не работают»)."
   say "  IP панели (${PANEL_IP:-не задан}) и текущий SSH добавятся сами."
-  say "  Несколько — через запятую, можно CIDR. Enter — пропустить."
-  ask TG_ALLOW "IP в белый список TrafficGuard" ""
+  if [ "$TG_SAVED_N" -gt 0 ]; then
+    ok "в белом списке уже $TG_SAVED_N адр. — они остаются:"
+    printf '%s\n' "$TG_SAVED" | head -12 | while IFS='|' read -r a note; do
+      [ "$a" = "$PANEL_IP" ] && note="${note:-панель}"
+      say "      $(pad "$a" 20) $CD$note$C0"
+    done
+    [ "$TG_SAVED_N" -gt 12 ] && say "      ${CD}…и ещё $((TG_SAVED_N - 12)) — весь список: begleq → 7${C0}"
+    say "  Enter — оставить как есть; новые — через запятую, можно CIDR. Убрать — begleq → 7."
+    ask TG_ALLOW "Добавить IP в белый список TrafficGuard" ""
+  else
+    say "  Несколько — через запятую, можно CIDR. Enter — пропустить."
+    ask TG_ALLOW "IP в белый список TrafficGuard" ""
+  fi
 fi
+# мусор в allow.list не пишем: tg-refresh его всё равно пропустит, а в
+# списке он висел бы годами
+TG_OK=""
+for a in $(printf '%s' "$TG_ALLOW" | tr ',;' '  '); do
+  if printf '%s' "$a" | grep -qE '^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F]*:[0-9a-fA-F:]+(/[0-9]{1,3})?)$'; then
+    TG_OK="${TG_OK:+$TG_OK,}$a"
+  else
+    bad "не похоже на IP: «$a» — в белый список не добавляю"
+  fi
+done
+TG_ALLOW="$TG_OK"
 
 ask NEW_HOSTNAME "Новое имя сервера (Enter — оставить $(hostname))" ""
 ask TIMEZONE     "Часовой пояс" "Europe/Moscow"
@@ -2601,7 +2635,12 @@ else
 say "     каталог     $INSTALL_DIR"
 say "     порт ноды   $NODE_PORT  (панель: ${PANEL_IP:-любой IP})"
 say "     SSH-порт    $SSH_PORT (для правила ufw)"
-[ "$DO_TG" = "1" ] && say "     TG-whitelist ${TG_ALLOW:-только панель и текущий SSH}"
+if [ "$DO_TG" = "1" ]; then
+  TG_SUM=""
+  [ "$TG_SAVED_N" -gt 0 ] && TG_SUM="уже $TG_SAVED_N адр."
+  [ -n "$TG_ALLOW" ] && TG_SUM="${TG_SUM:+$TG_SUM + }новые: $TG_ALLOW"
+  say "     TG-whitelist ${TG_SUM:+$TG_SUM; }панель и текущий SSH — сами"
+fi
 say "     ключ        ${SECRET_KEY:0:10}… (${#SECRET_KEY} симв.)"
 say "     имя сервера ${NEW_HOSTNAME:-$(hostname) — без изменений}"
 say "     часовой пояс $TIMEZONE"
