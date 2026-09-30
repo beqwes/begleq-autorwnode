@@ -530,7 +530,7 @@ menu_items() {
   local L R i
   L=("НОДА" " 1|состояние подробно" " 2|настроить или обновить" " 8|заглушка: пересобрать"
      "" "ДОМЕНЫ (SNI)" "13|добавить домен" "14|убрать домен"
-     "15|сменить версию ноды" "" "СКРИПТ" "10|обновить с гитхаба")
+     "15|сменить версию ноды" "" "СКРИПТ" "10|обновить с гитхаба" "16|тесты VPS")
   R=("СЕТЬ" " 3|WARP: включить" " 4|WARP: выключить" " 5|WARP: снести" " 9|WARP: outbound для панели"
      " 6|BBR и сетевые лимиты" " 7|TrafficGuard: исключения"
      "" "YANDEX CDN" "11|настроить origin" "12|инструкция")
@@ -609,6 +609,7 @@ menu_main() {
       13) menu_add_sni ;;
       14) menu_del_sni ;;
       15) change_node_version ;;
+      16) menu_tests ;;
       0|q|"") say "пока"; return 0 ;;
       *)  warn "нет такого пункта" ;;
     esac
@@ -768,6 +769,59 @@ change_node_version() {
     bad "контейнер remnanode не запущен — смотри: docker logs remnanode"
     return 1
   fi
+}
+
+# тесты VPS: чужие скрипты из шпаргалки. Каждый тянется из интернета и идёт
+# от root, поэтому перед запуском показываем точную команду и спрашиваем
+VPS_TESTS=(
+  "Регион IP: где сервер по мнению геобаз|bash <(wget -qO- https://ipregion.vrnt.xyz)"
+  "IP.Check.Place: блокировки зарубежными сервисами|bash <(curl -Ls IP.Check.Place) -l en"
+  "Multination: доступ к зарубежным сервисам|bash <(curl -L -s check.unlock.media) -E en -R 0"
+  "iperf3 многопоточный до РФ и зарубежья (@n_teslatel)|wget -qO- bench.tlab.pw | bash"
+  "Параметры + iperf3 до РФ и зарубежья (DigneZzZ)|wget -qO- bench.gig.ovh | bash"
+  "bench.sh: параметры + скорость до зарубежья|wget -qO- bench.sh | bash"
+  "Instagram: блокировка аудио|bash <(curl -L -s https://bench.openode.xyz/checker_inst.sh)"
+  "YABS: процессор, диск, сеть (IPv4)|curl -sL yabs.sh | bash -s -- -4"
+)
+
+menu_tests() {
+  local i n pick title cmd e rc
+  while :; do
+    rule "тесты VPS"
+    i=0
+    for e in "${VPS_TESTS[@]}"; do
+      i=$((i + 1))
+      printf '  %s%2d%s  %s\n' "$CC$CB" "$i" "$C0" "${e%%|*}"
+    done
+    say ""
+    say "  ${CD}Скрипты чужие: скачиваются из интернета и идут от root. Скоростные тесты"
+    say "  грузят канал на несколько минут, YABS ещё и пишет на диск — на живой ноде"
+    say "  с пользователями лучше запускать, когда нагрузка небольшая.${C0}"
+    printf '%s?%s номер теста (Enter — назад в меню): ' "$CC" "$C0"
+    IFS= read -r pick < "$TTY_IN" || return 0
+    [ -n "$pick" ] || return 0
+    n="${#VPS_TESTS[@]}"
+    case "$pick" in *[!0-9]*) warn "нет такого теста"; continue ;; esac
+    if [ "$pick" -lt 1 ] || [ "$pick" -gt "$n" ]; then warn "нет такого теста"; continue; fi
+    title="${VPS_TESTS[$((pick - 1))]%%|*}"
+    cmd="${VPS_TESTS[$((pick - 1))]#*|}"
+    say ""
+    say "  $CB$title$C0"
+    say "  команда: $CC$cmd$C0"
+    confirm "Запустить?" y || { warn "отменено"; continue; }
+    say ""
+    # Ctrl+C должен прервать тест, а не всё меню: обработчик (не игнор!)
+    # в дочерний процесс не наследуется, там сигнал сработает как обычно
+    trap 'printf "\n"' INT
+    bash -c "$cmd"
+    rc=$?
+    trap - INT
+    say ""
+    if [ "$rc" = 0 ]; then ok "тест закончен"; else warn "тест завершился с кодом $rc"; fi
+    printf '%sEnter%s — к списку тестов ' "$CC" "$C0"
+    IFS= read -r _ < "$TTY_IN" || true
+    say ""
+  done
 }
 
 # ставит команду begleq, чтобы меню открывалось откуда угодно
