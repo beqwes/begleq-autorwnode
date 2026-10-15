@@ -1664,6 +1664,7 @@ $CDN_GUARD
         root $WEBROOT;
         index index.html;
         add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
     }
 }
 
@@ -4866,6 +4867,7 @@ server {
     root $root;
     index index.html;
     add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
 
     location $XHTTP_PATH {
         client_max_body_size 0;$rip
