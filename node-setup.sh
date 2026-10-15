@@ -414,10 +414,18 @@ site_root() {
 
 has_cert() { [ -f "/etc/letsencrypt/live/$1/fullchain.pem" ]; }
 
+# ufw включён? Строку сравниваем целиком: «Status: inactive» тоже содержит
+# «active», и выключенный ufw годами считался включённым. LC_ALL=C — ufw
+# переведён, а на русской локали пишет «Состояние: активен»
+ufw_active() { LC_ALL=C ufw status 2>/dev/null | grep -qx 'Status: active'; }
+# правила, добавленные в ufw, в виде команд («ufw allow 2222/tcp …»). В отличие
+# от ufw status, видны и когда ufw выключен
+ufw_added() { LC_ALL=C ufw show added 2>/dev/null | grep '^ufw '; }
+
 # Let's Encrypt проверяет домен по :80, клиенты ходят на :443. Выключенный ufw
 # не включаем: без правил для SSH и панели он отрезал бы и их
 open_web_ports() {
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+  if command -v ufw >/dev/null 2>&1 && ufw_active; then
     ufw allow 80/tcp comment 'certbot' >/dev/null 2>&1
     ufw allow 443/tcp comment 'VPN tls' >/dev/null 2>&1
     ok "ufw: 80/tcp и 443/tcp открыты"
@@ -454,16 +462,41 @@ DOMAIN="${DOMAINS%% *}"
 
 # сверяем то, что панель реально отдала ядру, с тем, что настроено на ноде:
 # сайт-заглушку показывает Xray, а не nginx, поэтому SNI и dest должны сойтись
-check_panel_inbound() {
-  local args sock url cfg
+# живой конфиг Xray, который панель отдала ноде (JSON). Код 1 — не нашли, где
+# его спросить (ядро не запущено); пустой вывод — панель конфиг ещё не отдала
+xray_live_config() {
+  local args sock url
   args="$(tr '\0' ' ' < /proc/"$(pgrep -f rw-core | head -1)"/cmdline 2>/dev/null)"
   sock="$(printf '%s' "$args" | grep -oE '@rwint-[A-Za-z0-9]+' | head -1 | sed 's/^@//')"
   url="$(printf '%s' "$args" | grep -oE '/internal/get-config\?token=[A-Za-z0-9]+' | head -1)"
-  if [ -z "$sock" ] || [ -z "$url" ]; then
+  [ -n "$sock" ] && [ -n "$url" ] || return 1
+  curl -s --max-time 8 --abstract-unix-socket "$sock" "http://localhost$url" 2>/dev/null
+  return 0
+}
+
+# порты инбаундов Xray, открытые наружу («8443/tcp», «20000:50000/udp»): из
+# живого конфига, а пока панель его не отдала — что rw-core уже слушает по TCP
+xray_inbound_ports() {
+  local cfg
+  cfg="$(xray_live_config)"
+  if [ -n "$cfg" ] && command -v jq >/dev/null 2>&1; then
+    printf '%s' "$cfg" | jq -r '.inbounds[]?
+      | select((.listen // "") | test("^(0\\.0\\.0\\.0|::|\\[::\\])?$"))
+      | select(.port != null and (.port | tostring) != "0")
+      | (if (((.protocol // "") + " " + (.streamSettings.network // "")) | test("hysteria|wireguard|kcp|quic")) then "udp" else "tcp" end) as $p
+      | (.port | tostring | split(",")[] | gsub(" "; "") | gsub("-"; ":")) + "/" + $p' 2>/dev/null
+  else
+    ss -tlnpH 2>/dev/null | awk '/"rw-core"|"xray"/ { a = $4; p = a; sub(/.*:/, "", p); sub(/:[^:]*$/, "", a)
+                                                      if (a !~ /^(127\.|\[::1\]|\[::ffff:127\.)/) print p "/tcp" }'
+  fi | grep -E '^[0-9]+(:[0-9]+)?/(tcp|udp)$' | sort -u
+}
+
+check_panel_inbound() {
+  local cfg
+  if ! cfg="$(xray_live_config)"; then
     warn "не смог прочитать живой конфиг Xray — проверь инбаунд в панели вручную"
     return 0
   fi
-  cfg="$(curl -s --max-time 8 --abstract-unix-socket "$sock" "http://localhost$url" 2>/dev/null)"
   if [ -z "$cfg" ]; then
     warn "панель ещё не отдала ноде конфиг — привяжи ноду к инбаунду"
     return 0
@@ -2654,17 +2687,15 @@ else
   warn "ss недоступен"
 fi
 if command -v ufw >/dev/null 2>&1; then
-  UST="$(ufw status 2>/dev/null | head -1)"
   UNIT_STATE="$(systemctl is-active ufw 2>/dev/null)"
-  case "$UST" in
-    *active*)
-      ok "$UST"
-      if [ -n "$UNIT_STATE" ] && [ "$UNIT_STATE" != "active" ]; then
-        warn "при этом служба ufw в состоянии '$UNIT_STATE' — правила подняты, но после перезагрузки не встанут"
-      fi
-      ;;
-    *) warn "${UST:-ufw статус неизвестен}" ;;
-  esac
+  if ufw_active; then
+    ok "ufw включён"
+    if [ -n "$UNIT_STATE" ] && [ "$UNIT_STATE" != "active" ]; then
+      warn "при этом служба ufw в состоянии '$UNIT_STATE' — правила подняты, но после перезагрузки не встанут"
+    fi
+  else
+    warn "ufw выключен — фаервол ничего не фильтрует, все порты открыты всем (включит begleq → 2)"
+  fi
 fi
 
 # =============================================================================
@@ -2895,7 +2926,7 @@ if [ "$SITE_ONLY" != "1" ]; then
 EXIST_PANEL=""
 [ -s "$INSTALL_DIR/panel_ip" ] && EXIST_PANEL="$(head -1 "$INSTALL_DIR/panel_ip" | tr -d '[:space:]')"
 if [ -z "$EXIST_PANEL" ] && command -v ufw >/dev/null 2>&1; then
-  EXIST_PANEL="$(ufw status 2>/dev/null | awk '/# remnawave panel$/ && $3 != "Anywhere" && $3 !~ /\(v6\)/ {print $3; exit}')"
+  EXIST_PANEL="$(ufw_added | sed -nE "s/^ufw allow from ([^ ]+) to any port [0-9]+ comment 'remnawave panel'\$/\1/p" | head -1)"
 fi
 if [ -z "$PANEL_IP" ] && [ -n "$EXIST_PANEL" ]; then
   ok "на ноде уже есть IP панели: $EXIST_PANEL"
@@ -3164,14 +3195,17 @@ else
     # раньше порт мог быть открыт всем (IP не задавали) или старой панели —
     # без удаления этих правил «только для панели» ничего бы не закрыло
     # ufw отвечает успехом и на удаление несуществующего правила, поэтому
-    # сначала смотрим, есть ли оно, — иначе сообщение врало бы каждый запуск
-    UFW_NOW="$(ufw status 2>/dev/null)"
-    if printf '%s\n' "$UFW_NOW" | grep -qE "^${NODE_PORT}/tcp[[:space:]]+ALLOW[[:space:]]+Anywhere"; then
+    # сначала смотрим, есть ли оно, — иначе сообщение врало бы каждый запуск.
+    # Смотрим в ufw show added: ufw status у выключенного ufw правил не
+    # показывает, и правило «открыт всем» так и жило до его включения
+    UFW_NOW="$(ufw_added)"
+    if printf '%s\n' "$UFW_NOW" | grep -qE "^ufw allow ${NODE_PORT}(/tcp)?( |\$)"; then
       ufw --force delete allow "${NODE_PORT}/tcp" >/dev/null 2>&1
+      ufw --force delete allow "${NODE_PORT}" >/dev/null 2>&1
       ok "правило «порт $NODE_PORT открыт всем» убрано"
     fi
     if [ -n "$EXIST_PANEL" ] && [ "$EXIST_PANEL" != "$PANEL_IP" ] \
-       && printf '%s\n' "$UFW_NOW" | grep -qE "^${NODE_PORT}/tcp[[:space:]]+ALLOW[[:space:]]+${EXIST_PANEL//./\\.}([[:space:]]|\$)"; then
+       && printf '%s\n' "$UFW_NOW" | grep -qE "^ufw allow from ${EXIST_PANEL//./\\.} to any port ${NODE_PORT}( |\$)"; then
       ufw --force delete allow from "$EXIST_PANEL" to any port "$NODE_PORT" >/dev/null 2>&1
       ok "правило для прежней панели $EXIST_PANEL убрано"
     fi
@@ -3192,11 +3226,35 @@ else
       err "не смог открыть UDP $HYSTERIA_PORT (формат: 8443 или 20000:50000)"
     fi
   fi
-  UFW_STATE="$(ufw status 2>/dev/null | head -1)"
-  case "$UFW_STATE" in
-    *active*) ok "ufw уже включён, правила добавлены" ;;
-    *) yes | ufw --force enable >/dev/null 2>&1 && ok "ufw включён (SSH-порт $SSH_PORT разрешён)" || err "не смог включить ufw" ;;
-  esac
+  # инбаунды Xray на других портах задаёт панель — без правила ufw нода
+  # перестала бы принимать на них клиентов
+  XPORTS=""
+  for p in $(xray_inbound_ports); do
+    case "$p" in 443/tcp|443/udp|80/tcp|"$NODE_PORT"/tcp) continue ;; esac
+    ufw allow "$p" comment 'xray inbound' >/dev/null 2>&1 && XPORTS="$XPORTS $p"
+  done
+  [ -n "$XPORTS" ] && ok "открыты порты инбаундов Xray из панели:$XPORTS"
+
+  if ufw_active; then
+    ok "ufw включён, правила обновлены"
+  else
+    # что сейчас слушает наружу и после включения закроется — чтобы это не
+    # стало сюрпризом: порты, которых нет ни в одном правиле ufw
+    UFW_NOW="$(ufw_added)"
+    CLOSING="$(ss -tlnpH 2>/dev/null | awk '{ a = $4; p = a; sub(/.*:/, "", p); sub(/:[^:]*$/, "", a)
+        if (a ~ /^(127\.|\[::1\]|\[::ffff:127\.)/ || a ~ /%lo$/) next
+        n = "?"; if (match($0, /users:\(\("[^"]+"/)) n = substr($0, RSTART + 9, RLENGTH - 10)
+        print p, n }' | sort -un | while read -r p n; do
+          printf '%s\n' "$UFW_NOW" | grep -qE "(^ufw allow ${p}(/tcp)?( |\$)| port ${p}( |\$))" || printf ' %s/tcp (%s)' "$p" "$n"
+        done)"
+    if yes | ufw --force enable >/dev/null 2>&1 && ufw_active; then
+      ok "ufw включён: снаружи открыты SSH $SSH_PORT, 80, 443 и порт ноды $NODE_PORT${PANEL_IP:+ (только для $PANEL_IP)}"
+      [ -n "$CLOSING" ] && warn "закрылись порты других программ:$CLOSING — если какой-то нужен: ufw allow ПОРТ/tcp"
+      say "      инбаунд в панели на новом порту откроет повторный запуск (begleq → 2) или ufw allow ПОРТ/tcp"
+    else
+      err "не смог включить ufw"
+    fi
+  fi
 fi
 
 if [ "$DO_F2B" = "1" ]; then
@@ -5364,7 +5422,7 @@ rule "сервер"
 kv "хост" "$(hostname)"
 kv "ОС" "$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}")"
 kv "Docker" "$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,)"
-kv "UFW" "$(ufw status 2>/dev/null | head -1 | sed 's/^Status: //')"
+kv "UFW" "$(LC_ALL=C ufw status 2>/dev/null | head -1 | sed 's/^Status: //')"
 kv "swap" "$(free -m | awk '/^Swap:/{print $2}') МБ"
 
 if [ "$SITE_ONLY" != "1" ]; then
