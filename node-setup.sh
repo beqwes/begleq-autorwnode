@@ -17,7 +17,7 @@
 # =============================================================================
 set -u
 
-VERSION="4.5"
+VERSION="4.6"
 STAMP="$(date +%s)"
 FAILED=""
 
@@ -4891,12 +4891,42 @@ server {
         proxy_pass http://unix:$WS_SOCKET;
     }
 
+    # несуществующий путь — 404, как у обычного сайта: если на любой адрес
+    # отдавать главную, сканер видит, что за доменом не настоящий сайт
     location / {
-        try_files \$uri \$uri/ /index.html;
+        try_files \$uri \$uri/ =404;
     }
 }
 
 BLOCK
+  }
+
+  # блок на чужой SNI и заход по IP: $1 listen. Обычный сервер в таком случае
+  # отдаёт свой сертификат и 404 — так и делаем, если сертификат есть хоть у
+  # одного домена. Без сертификатов — обрыв рукопожатия: nginx без файла
+  # сертификата не стартует, а ssl_reject_handshake его не требует
+  ng_default_block() {
+    local listen="$1" d="${NG_DOMAINS%% *}"
+    if [ -n "$d" ]; then
+      cat <<BLOCK
+server {
+    listen $listen default_server;
+    server_name _;
+    ssl_certificate     /etc/letsencrypt/live/$d/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$d/privkey.pem;
+    return 404;
+}
+BLOCK
+    else
+      cat <<BLOCK
+server {
+    listen $listen default_server;
+    server_name _;
+    ssl_reject_handshake on;
+    return 444;
+}
+BLOCK
+    fi
   }
 
   # в конфиг идут только домены с сертификатом: nginx без файла сертификата
@@ -4940,12 +4970,7 @@ ssl_session_cache shared:MozSSL:10m;
 ssl_session_tickets off;
 
 $(for d in $NG_DOMAINS; do ng_site_block "$d" "unix:/dev/shm/nginx.sock ssl proxy_protocol" 1; done)
-server {
-    listen unix:/dev/shm/nginx.sock ssl proxy_protocol default_server;
-    server_name _;
-    ssl_reject_handshake on;
-    return 444;
-}
+$(ng_default_block "unix:/dev/shm/nginx.sock ssl proxy_protocol")
 NGINX
 
   # порт 80: без него сайт-заглушка выглядит неживой — настоящий сайт на :80
@@ -4956,11 +4981,13 @@ NGINX
     warn "порт 80 занят другим процессом — блок редиректа не добавляю"
   else
     mkdir -p /var/www/certbot
-    cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
+    # редирект в https — только своим доменам; заход по IP или с чужим Host
+    # получает 404, а не редирект на https://IP (он бы упёрся в отбойник)
+    [ -n "$NG_DOMAINS" ] && cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
 
 server {
-    listen 0.0.0.0:80 default_server;
-    server_name $NG_DOMAINS _;
+    listen 0.0.0.0:80;
+    server_name $NG_DOMAINS;
 
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -4972,23 +4999,36 @@ server {
     }
 }
 NGINX
+    # ACME-челлендж и здесь: сертификат домена, которого ещё нет в nginx,
+    # выпускается через этот блок
+    cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
+
+server {
+    listen 0.0.0.0:80 default_server;
+    server_name _;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location / {
+        return 404;
+    }
+}
+NGINX
     ok "на :80 повешен редирект в https и путь для продления сертификата"
   fi
 
   # ноды нет: те же сайты напрямую на :443, без proxy_protocol — его шлёт
-  # только Xray. Отбойник по-прежнему не отдаёт сертификат на чужой SNI и IP
+  # только Xray. На чужой SNI и IP — тот же блок 404, что и за Xray
   if [ "$NG_DIRECT" = "1" ] && [ -n "$NG_DOMAINS" ]; then
     cat >> "$INSTALL_DIR/nginx.conf" <<NGINX
 
 $NG_DIRECT_MARK
 # ноды нет — сайт отдаёт сам nginx. Появится нода — порт уйдёт Xray
 $(for d in $NG_DOMAINS; do ng_site_block "$d" "0.0.0.0:443 ssl" 0; done)
-server {
-    listen 0.0.0.0:443 ssl default_server;
-    server_name _;
-    ssl_reject_handshake on;
-    return 444;
-}
+$(ng_default_block "0.0.0.0:443 ssl")
 NGINX
     ok "ноды нет — nginx сам отдаёт сайт на :443"
   fi
